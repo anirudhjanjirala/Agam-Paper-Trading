@@ -1,0 +1,27 @@
+# Python / FastAPI
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+backend/*.db
+backend/*.sqlite*
+backend/agam_portfolio.db
+
+# Next.js / Node
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+.pnp
+.pnp.*
+npm-debug.log*
+
+# Environment & OS
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+*.log
