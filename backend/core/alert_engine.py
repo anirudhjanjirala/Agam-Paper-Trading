@@ -83,8 +83,15 @@ class NonExpiringAlertEngine:
     def _zkey(self, symbol: str, condition: ConditionType) -> str:
         return f"agam:alerts:{condition}:{symbol}"
 
-    def add_rule(self, symbol: str, condition: ConditionType, threshold: float, note: str = "") -> AlertRule:
-        rule_id = f"alr-{int(time.time() * 1000)}-{len(self.rules) + 1}"
+    def add_rule(
+        self,
+        symbol: str,
+        condition: ConditionType,
+        threshold: float,
+        note: str = "",
+        rule_id: Optional[str] = None,
+    ) -> AlertRule:
+        rule_id = rule_id or f"alr-{int(time.time() * 1000)}-{len(self.rules) + 1}"
         rule = AlertRule(
             id=rule_id,
             symbol=symbol,

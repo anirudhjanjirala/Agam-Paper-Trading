@@ -1,0 +1,137 @@
+@import "tailwindcss";
+
+:root {
+  --tv-bg-primary: #ffffff;
+  --tv-bg-secondary: #f8f9fd;
+  --tv-bg-hover: #f0f3fa;
+  --tv-border: #e0e3eb;
+  --tv-text-primary: #131722;
+  --tv-text-muted: #787b86;
+  --tv-accent: #2962ff;
+  --tv-bull: #089981;
+  --tv-bull-bg: #e8f5e9;
+  --tv-bear: #f23645;
+  --tv-bear-bg: #ffebee;
+}
+
+html.dark {
+  --tv-bg-primary: #0b0e14;
+  --tv-bg-secondary: #131722;
+  --tv-bg-hover: #1e222d;
+  --tv-border: #2a2e39;
+  --tv-text-primary: #d1d4dc;
+  --tv-text-muted: #868993;
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--tv-bg-primary);
+  color: var(--tv-text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, Ubuntu, sans-serif;
+  overflow-x: hidden;
+}
+
+/* Instant Zero-Flicker Official Dark (#0B0E14) Surface Overrides */
+html.dark .bg-\[\#FFFFFF\],
+html.dark .bg-\[\#FFFFFF\]\/95,
+html.dark .bg-\[\#FFFFFF\]\/90,
+html.dark .bg-\[\#FFFFFF\]\/85,
+html.dark .bg-\[\#FFFFFF\]\/80 {
+  background-color: #0b0e14 !important;
+}
+
+html.dark .bg-\[\#F8F9FD\] {
+  background-color: #131722 !important;
+}
+
+html.dark .bg-\[\#F0F3FA\] {
+  background-color: #1e222d !important;
+}
+
+html.dark .bg-\[\#EBECEF\] {
+  background-color: #06080d !important;
+}
+
+html.dark .border-\[\#E0E3EB\] {
+  border-color: #2a2e39 !important;
+}
+
+html.dark .border-\[\#F0F3FA\] {
+  border-color: #1e222d !important;
+}
+
+html.dark .text-\[\#131722\] {
+  color: #d1d4dc !important;
+}
+
+html.dark .text-\[\#787B86\],
+html.dark .text-\[\#6A6D78\] {
+  color: #868993 !important;
+}
+
+html.dark .hover\:bg-\[\#F0F3FA\]:hover {
+  background-color: #1e222d !important;
+}
+
+html.dark .hover\:bg-\[\#F8F9FD\]:hover {
+  background-color: #131722 !important;
+}
+
+html.dark .bg-\[\#E8F5E9\] {
+  background-color: rgba(8, 153, 129, 0.14) !important;
+}
+
+html.dark .bg-\[\#FFEBEE\] {
+  background-color: rgba(242, 54, 69, 0.14) !important;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--tv-bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d1d4dc;
+  border-radius: 4px;
+}
+
+html.dark ::-webkit-scrollbar-thumb {
+  background: #2a2e39;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #9598a1;
+}
+
+/* Live Market Pulsing Dot (Green #089981) */
+@keyframes pulseGlowLight {
+  0% {
+    box-shadow: 0 0 0 0 rgba(8, 153, 129, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(8, 153, 129, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(8, 153, 129, 0);
+  }
+}
+
+.live-pulse {
+  animation: pulseGlowLight 2s infinite;
+}
+
+@media print {
+  header,
+  nav,
+  aside {
+    display: none !important;
+  }
+  body {
+    overflow: visible !important;
+  }
+}

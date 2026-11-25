@@ -1,8 +1,13 @@
 import asyncio
+import csv
+import gc
 import html
+import io
 import json
+import os
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -12,13 +17,29 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from core.alert_engine import ConditionType, NonExpiringAlertEngine
+from core.auth import (
+    REFRESH_COOKIE_NAME,
+    clear_session_cookies,
+    create_user_account,
+    decode_access_token,
+    get_optional_user,
+    get_or_provision_workspace_user,
+    issue_session_tokens,
+    rotate_refresh_token,
+    verify_password,
+)
+from core.database import SessionLocal, get_db, init_db
 from core.fundamentals import get_asset_events, get_asset_financials, get_asset_overview
-from core.paper_wallets import DEFAULT_WALLETS, PaperTradingEngine, REGION_DEFAULT_CURRENCY
+from core.models import OrderModel, UserAlertModel, UserModel
+from core.paper_wallets import DEFAULT_WALLETS, REGION_DEFAULT_CURRENCY
 from core.quant_engine import (
     INDICATOR_CATALOG,
     compute_chained_indicator,
@@ -30,16 +51,32 @@ from core.quant_engine import (
 )
 from core.replay_engine import IsolatedReplayEngine
 from core.screener_engine import ScreenerQuery, run_columnar_scan
+from core.tenant_store import (
+    TenantPortfolioService,
+    delete_user_alert,
+    get_user_layout,
+    get_user_watchlists,
+    list_user_alerts,
+    save_user_layout,
+    upsert_user_watchlist,
+)
 from core.tick_aggregator import Tick, TickAggregator
 from core.universe_loader import GlobalUniverseStore
+from core.ws_hub import RealtimeWebSocketHub
 from engine.google_finance import GoogleFinanceEngine
 from engine.google_news import GoogleNewsEngine
 
-app = FastAPI(title="Agam Institutional Paper Trading API", version="4.0.0")
+app = FastAPI(title="Agam Institutional Multi-Tenant Paper Trading API", version="5.0.0")
 
+_extra_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        *_extra_origins,
+    ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^https://.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -54,8 +91,9 @@ UNIVERSE = GlobalUniverseStore()
 TICK_AGGREGATOR = TickAggregator(max_bars=500)
 ALERTS = NonExpiringAlertEngine(cooldown_sec=60)
 REPLAY = IsolatedReplayEngine()
-PORTFOLIO_DB_PATH = str(Path(__file__).parent / "agam_portfolio.db")
-PAPER_ENGINE = PaperTradingEngine(db_path=PORTFOLIO_DB_PATH)
+WS_HUB = RealtimeWebSocketHub()
+ALERT_USER_MAP: Dict[str, str] = {}
+MAIN_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 LIVE_PRICES: Dict[str, dict] = {}
 PRICE_LOCK = threading.RLock()
@@ -144,6 +182,7 @@ def sync_batch_quotes(symbols: List[str]) -> None:
 
     now_ms = int(time.time() * 1000)
     updates: Dict[str, dict] = {}
+    fired_alerts: List[dict] = []
     with ThreadPoolExecutor(max_workers=12) as pool:
         for res in pool.map(_sync_one_symbol, symbols):
             if res and res.get("price", 0) > 0:
@@ -153,13 +192,42 @@ def sync_batch_quotes(symbols: List[str]) -> None:
                     Tick(symbol=sym, price=res["price"], size=max(1, res.get("volume", 1000) // 1000), ts_ms=now_ms, bid=res.get("bid"), ask=res.get("ask")),
                     intervals=["1s", "5s", "1m", "10T", "1R"],
                 )
-                ALERTS.evaluate_tick(sym, res["price"], res.get("rsi_14", 50.0))
+                for ev in ALERTS.evaluate_tick(sym, res["price"], res.get("rsi_14", 50.0)):
+                    ev["user_id"] = ALERT_USER_MAP.get(ev.get("rule_id", ""), "")
+                    fired_alerts.append(ev)
 
     if updates:
         with PRICE_LOCK:
             LIVE_PRICES.update(updates)
         UNIVERSE.update_quotes(updates)
-        PAPER_ENGINE.evaluate_live_triggers(LIVE_PRICES)
+
+        with SessionLocal() as db:
+            fill_events = TenantPortfolioService.evaluate_all_pending_and_stops(db, LIVE_PRICES)
+            for ev in fired_alerts:
+                uid = ev.get("user_id")
+                row = db.get(UserAlertModel, ev.get("rule_id")) if ev.get("rule_id") else None
+                if row:
+                    row.triggered_count += 1
+                    row.triggered_at = datetime.now(timezone.utc)
+                    uid = row.user_id
+                if uid:
+                    WS_HUB.schedule_user_event(MAIN_EVENT_LOOP, uid, {"type": "ALERT_TRIGGERED", "alert": ev})
+            if fired_alerts:
+                db.commit()
+
+            for fe in fill_events:
+                uid = fe.get("user_id")
+                if uid:
+                    WS_HUB.schedule_user_event(MAIN_EVENT_LOOP, uid, fe)
+
+        if MAIN_EVENT_LOOP and MAIN_EVENT_LOOP.is_running():
+            for sym, q in updates.items():
+                if sym in WS_HUB.market_sockets:
+                    asyncio.run_coroutine_threadsafe(
+                        WS_HUB.publish_market_tick(sym, {"type": "TICK", **q}),
+                        MAIN_EVENT_LOOP,
+                    )
+
         LAST_MARKET_SYNC = datetime.now(timezone.utc).isoformat()
 
 
@@ -257,6 +325,7 @@ def _startup_ingest_and_sync_loop():
     print("Ingesting live global security universe (IND, USA, CANADA, CHINA, EU) in background...")
     try:
         UNIVERSE.ingest_all_regions_parallel()
+        gc.collect()
         print("Universe ingested:", UNIVERSE.stats)
     except Exception as exc:
         print("Universe ingest warning:", exc)
@@ -275,9 +344,23 @@ def _startup_ingest_and_sync_loop():
 UNIVERSE._upsert_records([_starter_record(s) for s in PRIORITY_LIVE_SYMBOLS])
 
 
+def _load_persisted_alerts_to_zset() -> None:
+    try:
+        with SessionLocal() as db:
+            rows = db.scalars(select(UserAlertModel).where(UserAlertModel.is_active.is_(True))).all()
+            for r in rows:
+                ALERT_USER_MAP[r.id] = r.user_id
+                ALERTS.add_rule(r.symbol, r.condition, r.target_value, r.note, rule_id=r.id)  # type: ignore[arg-type]
+    except Exception as exc:
+        print("Alert preload warning:", exc)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _BG_STARTED
+    global _BG_STARTED, MAIN_EVENT_LOOP
+    MAIN_EVENT_LOOP = asyncio.get_running_loop()
+    init_db()
+    _load_persisted_alerts_to_zset()
     if not _BG_STARTED:
         _BG_STARTED = True
         threading.Thread(target=_startup_ingest_and_sync_loop, daemon=True).start()
@@ -851,21 +934,260 @@ class AlertCreateRequest(BaseModel):
     note: str = ""
 
 
+# -------------------------------------------------------------
+# MULTI-TENANT JWT AUTHENTICATION & USER PREFERENCES
+# -------------------------------------------------------------
+class AuthCredentials(BaseModel):
+    email: str
+    password: str
+    base_currency: str = "USD"
+    theme_preference: str = "light"
+
+
+class PreferencesPatch(BaseModel):
+    base_currency: Optional[str] = None
+    theme_preference: Optional[str] = None
+
+
+def _user_payload(user: UserModel, access_token: Optional[str] = None) -> dict:
+    data = {
+        "id": user.id,
+        "email": user.email,
+        "role": user.role,
+        "base_currency": user.base_currency,
+        "theme_preference": user.theme_preference,
+        "is_guest": user.is_guest,
+    }
+    if access_token:
+        data["access_token"] = access_token
+    return data
+
+
+@app.post("/api/auth/register")
+def register_user(req: AuthCredentials, request: Request, response: Response, db: Session = Depends(get_db)):
+    email = req.email.strip().lower()
+    if "@" not in email or len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="Valid email and password (min 6 chars) required.")
+    if db.scalar(select(UserModel).where(UserModel.email == email)):
+        raise HTTPException(status_code=409, detail="Email is already registered.")
+    user = create_user_account(
+        db,
+        email=email,
+        password=req.password,
+        base_currency=req.base_currency,
+        theme_preference=req.theme_preference,
+        is_guest=False,
+    )
+    tokens = issue_session_tokens(db, user, request, response)
+    return _user_payload(user, tokens["access_token"])
+
+
+@app.post("/api/auth/login")
+def login_user(req: AuthCredentials, request: Request, response: Response, db: Session = Depends(get_db)):
+    email = req.email.strip().lower()
+    user = db.scalar(select(UserModel).where(UserModel.email == email))
+    if not user or not verify_password(req.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    tokens = issue_session_tokens(db, user, request, response)
+    return _user_payload(user, tokens["access_token"])
+
+
+@app.post("/api/auth/refresh")
+def refresh_session(request: Request, response: Response, db: Session = Depends(get_db)):
+    raw = request.cookies.get(REFRESH_COOKIE_NAME)
+    if not raw:
+        raise HTTPException(status_code=401, detail="Missing refresh token")
+    rotated = rotate_refresh_token(db, raw, request, response)
+    if not rotated:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+    user, access_tok = rotated
+    return _user_payload(user, access_tok)
+
+
+@app.post("/api/auth/logout")
+def logout_user(request: Request, response: Response, db: Session = Depends(get_db)):
+    clear_session_cookies(request, response)
+    guest = create_user_account(
+        db,
+        email=f"guest-{uuid.uuid4().hex[:10]}@agam.local",
+        password=uuid.uuid4().hex,
+        is_guest=True,
+    )
+    tokens = issue_session_tokens(db, guest, request, response)
+    return {"status": "LOGGED_OUT", "user": _user_payload(guest, tokens["access_token"])}
+
+
+@app.get("/api/auth/me")
+def get_me(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
+    existing = get_optional_user(request, db)
+    tok = None if existing else issue_session_tokens(db, current_user, request, response)["access_token"]
+    return _user_payload(current_user, tok)
+
+
+@app.patch("/api/auth/preferences")
+def update_preferences(
+    patch: PreferencesPatch,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
+    if patch.base_currency:
+        current_user.base_currency = patch.base_currency
+    if patch.theme_preference in ("light", "dark"):
+        current_user.theme_preference = patch.theme_preference
+    db.commit()
+    return _user_payload(current_user)
+
+
+# -------------------------------------------------------------
+# MULTI-TENANT ALERTS (WHERE user_id = current_user.id)
+# -------------------------------------------------------------
 @app.get("/api/alerts")
-def get_alerts():
-    return ALERTS.list_state()
+def get_alerts(
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
+    return list_user_alerts(db, current_user.id, ALERTS.backend_mode, ALERTS.triggered_log)
 
 
 @app.post("/api/alerts")
-def create_alert(req: AlertCreateRequest):
-    return {"status": "CREATED", "rule": ALERTS.add_rule(req.symbol, req.condition, req.threshold, req.note)}
+def create_alert(
+    req: AlertCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
+    rule_id = f"alr-{uuid.uuid4().hex[:10]}"
+    row = UserAlertModel(
+        id=rule_id,
+        user_id=current_user.id,
+        symbol=req.symbol.upper(),
+        condition=req.condition,
+        target_value=float(req.threshold),
+        note=req.note,
+        is_active=True,
+    )
+    db.add(row)
+    db.commit()
+    ALERT_USER_MAP[rule_id] = current_user.id
+    rule = ALERTS.add_rule(row.symbol, req.condition, req.threshold, req.note, rule_id=rule_id)
+    return {"status": "CREATED", "rule": rule}
 
 
 @app.delete("/api/alerts/{rule_id}")
-def delete_alert(rule_id: str):
-    if not ALERTS.delete_rule(rule_id):
+def delete_alert(
+    rule_id: str,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
+    if not delete_user_alert(db, current_user.id, rule_id):
         raise HTTPException(status_code=404, detail="Alert rule not found")
+    ALERT_USER_MAP.pop(rule_id, None)
+    ALERTS.delete_rule(rule_id)
     return {"status": "DELETED", "rule_id": rule_id}
+
+
+# -------------------------------------------------------------
+# CLOUD-SYNCED CHART LAYOUTS, DRAWINGS & WATCHLISTS
+# -------------------------------------------------------------
+class LayoutSaveRequest(BaseModel):
+    layout_name: str = "default"
+    symbol: str = "RELIANCE.NS"
+    grid_type: str = "1x1"
+    drawings: list = []
+    active_indicators: list = []
+
+
+class WatchlistSaveRequest(BaseModel):
+    name: str = "Primary"
+    symbols: List[str] = []
+
+
+@app.get("/api/user/layouts")
+def fetch_layout(
+    layout_name: str = "default",
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
+    return get_user_layout(db, current_user.id, layout_name)
+
+
+@app.put("/api/user/layouts")
+def store_layout(
+    req: LayoutSaveRequest,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
+    return save_user_layout(
+        db,
+        current_user.id,
+        req.layout_name,
+        req.symbol,
+        req.grid_type,
+        req.drawings,
+        req.active_indicators,
+    )
+
+
+@app.get("/api/user/watchlists")
+def fetch_watchlists(
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
+    return get_user_watchlists(db, current_user.id)
+
+
+@app.put("/api/user/watchlists")
+def store_watchlist(
+    req: WatchlistSaveRequest,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
+    return upsert_user_watchlist(db, current_user.id, req.name, req.symbols)
+
+
+# -------------------------------------------------------------
+# EXPORT CAPABILITIES (Trade History & OHLCV CSV)
+# -------------------------------------------------------------
+@app.get("/api/export/trades.csv")
+def export_trades_csv(
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
+    orders = db.scalars(
+        select(OrderModel).where(OrderModel.user_id == current_user.id).order_by(OrderModel.created_at.desc())
+    ).all()
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["OrderID", "Symbol", "Side", "Mode", "Status", "Qty", "Price", "Currency", "Charges", "Timestamp"])
+    for o in orders:
+        writer.writerow([o.id, o.symbol, o.side, o.order_mode, o.status, o.qty, o.price or o.limit_price, o.currency, o.charges, o.created_at.isoformat()])
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=agam_trade_history.csv"},
+    )
+
+
+@app.get("/api/export/history/{symbol}.csv")
+def export_history_csv(symbol: str, interval: str = "1d", period: str = "3mo"):
+    bars = _dedupe_asc_bars(_load_candles(symbol, interval=interval, period=period))
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Time", "Open", "High", "Low", "Close", "Volume"])
+    for b in bars:
+        writer.writerow([b["time"], b["open"], b["high"], b["low"], b["close"], b.get("volume", 0)])
+    buf.seek(0)
+    safe_sym = symbol.replace("^", "").replace("/", "_")
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={safe_sym}_{interval}_{period}.csv"},
+    )
 
 
 class ReplayStartRequest(BaseModel):
@@ -938,8 +1260,11 @@ def get_expiries(symbol: str):
 
 
 @app.get("/api/portfolio")
-def get_portfolio():
-    return PAPER_ENGINE.get_snapshot(LIVE_PRICES)
+def get_portfolio(
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
+    return TenantPortfolioService.get_snapshot(db, current_user.id, LIVE_PRICES)
 
 
 class OrderRequest(BaseModel):
@@ -953,7 +1278,11 @@ class OrderRequest(BaseModel):
 
 
 @app.post("/api/orders/place")
-def place_order(order: OrderRequest):
+def place_order(
+    order: OrderRequest,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
     meta = UNIVERSE.get_by_symbol(order.symbol)
     curr = meta["currency"] if meta else "USD"
     name = meta["name"] if meta else order.symbol
@@ -966,7 +1295,9 @@ def place_order(order: OrderRequest):
         raise HTTPException(status_code=404, detail=f"Live quote unavailable for {order.symbol}")
 
     try:
-        return PAPER_ENGINE.place_order(
+        res = TenantPortfolioService.place_order(
+            db=db,
+            user_id=current_user.id,
             symbol=order.symbol,
             name=name,
             currency=curr,
@@ -978,26 +1309,66 @@ def place_order(order: OrderRequest):
             stop_loss=order.stop_loss,
             take_profit=order.take_profit,
         )
+        WS_HUB.schedule_user_event(MAIN_EVENT_LOOP, current_user.id, {"type": "PORTFOLIO_UPDATE", **res})
+        return res
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.delete("/api/orders/{order_id}")
-def cancel_pending_order(order_id: str):
-    if not PAPER_ENGINE.cancel_pending_order(order_id):
+def cancel_pending_order(
+    order_id: str,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
+    if not TenantPortfolioService.cancel_pending_order(db, current_user.id, order_id):
         raise HTTPException(status_code=404, detail="Pending order not found")
     return {"status": "CANCELLED", "order_id": order_id}
 
 
 @app.post("/api/portfolio/reset")
-def reset_portfolio():
-    PAPER_ENGINE.reset()
+def reset_portfolio(
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_or_provision_workspace_user),
+):
+    TenantPortfolioService.reset_user_portfolio(db, current_user.id)
+    WS_HUB.schedule_user_event(MAIN_EVENT_LOOP, current_user.id, {"type": "PORTFOLIO_RESET"})
     return {"status": "SUCCESS", "message": "Virtual multi-currency wallets & positions reset!"}
 
 
 # -------------------------------------------------------------
-# REAL-TIME MULTIPLEXED WEBSOCKET STREAM (Quotes + Breaking News)
+# REAL-TIME WEBSOCKETS (/ws/live, /ws/market/{symbol}, /ws/user/{user_id})
 # -------------------------------------------------------------
+@app.websocket("/ws/market/{symbol}")
+async def websocket_market_symbol(websocket: WebSocket, symbol: str):
+    await WS_HUB.connect_market(symbol, websocket)
+    try:
+        while True:
+            with PRICE_LOCK:
+                quote = LIVE_PRICES.get(symbol)
+            if quote:
+                await websocket.send_json({"type": "TICK", **quote})
+            await asyncio.sleep(1.5)
+    except (WebSocketDisconnect, Exception):
+        WS_HUB.disconnect_market(symbol, websocket)
+
+
+@app.websocket("/ws/user/{user_id}")
+async def websocket_user_stream(websocket: WebSocket, user_id: str):
+    token = websocket.cookies.get("agam_access") or websocket.query_params.get("token")
+    payload = decode_access_token(token) if token else None
+    if payload and payload.get("sub") != user_id:
+        await websocket.close(code=1008)
+        return
+    await WS_HUB.connect_user(user_id, websocket)
+    try:
+        while True:
+            await asyncio.sleep(20)
+            await websocket.send_json({"type": "PING", "user_id": user_id})
+    except (WebSocketDisconnect, Exception):
+        WS_HUB.disconnect_user(user_id, websocket)
+
+
 @app.websocket("/ws/live")
 async def websocket_live_feed(websocket: WebSocket):
     await websocket.accept()
@@ -1033,7 +1404,6 @@ async def websocket_live_feed(websocket: WebSocket):
                     "all_prices": all_prices,
                 })
 
-            # Poll Google News RSS every 30s for breaking headline alerts
             now = time.time()
             if (now - last_news_poll) >= 30.0:
                 last_news_poll = now
@@ -1051,9 +1421,7 @@ async def websocket_live_feed(websocket: WebSocket):
                     })
 
             await asyncio.sleep(1.5)
-    except WebSocketDisconnect:
-        pass
-    except Exception:
+    except (WebSocketDisconnect, Exception):
         pass
 
 
