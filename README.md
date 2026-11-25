@@ -201,6 +201,16 @@ Agam Paper Trading/
 
 ---
 
+## Contact
+
+For questions, feedback, collaborations, or bug reports, reach out directly:
+
+- **Maintainer:** Anirudh Janjirala
+- **Email:** [anirudhjanjirala@gmail.com](mailto:anirudhjanjirala@gmail.com)
+- **GitHub:** [anirudhjanjirala/Agam-Paper-Trading](https://github.com/anirudhjanjirala/Agam-Paper-Trading)
+
+---
+
 ## License
 
 This project is open source and available under the **[MIT License](LICENSE)**.
