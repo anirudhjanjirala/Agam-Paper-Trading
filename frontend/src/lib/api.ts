@@ -1,11 +1,20 @@
-const DEFAULT_HTTP = "http://127.0.0.1:8000";
+export const cleanUrl = (url: string = "") => {
+  const trimmed = url.trim();
+  const mdMatch = trimmed.match(/\[[^\]]*\]\((https?:\/\/[^)\s]+|wss?:\/\/[^)\s]+)\)/i);
+  const extracted = mdMatch ? mdMatch[1] : trimmed;
+  return extracted.replace(/[\[\]\(\)]/g, "").replace(/\/+$/, "");
+};
 
-export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || DEFAULT_HTTP).replace(/\/+$/, "");
+const DEFAULT_HTTP = "http://localhost:8000";
+const DEFAULT_WS = "ws://localhost:8000";
 
-export const WS_BASE_URL = (
-  process.env.NEXT_PUBLIC_WS_URL ||
-  API_BASE_URL.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
-).replace(/\/+$/, "");
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL
+  ? cleanUrl(process.env.NEXT_PUBLIC_API_URL)
+  : DEFAULT_HTTP;
+
+export const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL
+  ? cleanUrl(process.env.NEXT_PUBLIC_WS_URL)
+  : DEFAULT_WS;
 
 const TOKEN_STORAGE_KEY = "agam_access_token";
 

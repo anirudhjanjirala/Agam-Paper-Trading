@@ -8,6 +8,8 @@ venv/
 backend/*.db
 backend/*.sqlite*
 backend/agam_portfolio.db
+backend/.agam_jwt_secret
+.agam_jwt_secret
 
 # Next.js / Node
 frontend/node_modules/

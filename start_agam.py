@@ -140,6 +140,7 @@ def main() -> int:
         "127.0.0.1",
         "--port",
         "8000",
+        *([] if use_prod else ["--reload"]),
     ]
     frontend_cmd = [npm_exe, "run", frontend_script]
 

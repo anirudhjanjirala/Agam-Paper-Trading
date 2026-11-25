@@ -77,6 +77,8 @@ def to_google_finance_ticker(symbol: str, exchange_hint: Optional[str] = None) -
     for suffix, gf_exch in SUFFIX_TO_GF_EXCHANGE.items():
         if sym.endswith(suffix.upper()):
             core = sym[: -len(suffix)]
+            if suffix.upper() == ".BO":
+                return [f"{core}:BOM", f"{core}:NSE"]
             return [f"{core}:{gf_exch}"]
 
     # US equities / ETFs
@@ -509,7 +511,7 @@ class GoogleFinanceEngine:
     def _fetch_nasdaq_history_sync(self, symbol: str, interval: str, period: str) -> List[dict]:
         if "." in symbol or "=" in symbol or symbol.startswith("^"):
             return []
-        days_map = {"1mo": 35, "3mo": 95, "6mo": 185, "1y": 370, "2y": 735, "5y": 1830, "max": 1830}
+        days_map = {"1mo": 35, "3mo": 95, "6mo": 185, "1y": 370, "2y": 735, "5y": 1830, "max": 20000}
         now_dt = datetime.now(timezone.utc).date()
         if period.lower() == "ytd":
             from_dt = datetime(now_dt.year, 1, 1, tzinfo=timezone.utc).date()
@@ -529,7 +531,7 @@ class GoogleFinanceEngine:
             try:
                 url = (
                     f"https://api.nasdaq.com/api/quote/{symbol}/historical"
-                    f"?assetclass={asset_cls}&fromdate={from_s}&limit=9999&todate={to_s}"
+                    f"?assetclass={asset_cls}&fromdate={from_s}&limit=99999&todate={to_s}"
                 )
                 r = httpx.get(url, headers={"User-Agent": random.choice(USER_AGENTS)}, timeout=8.0)
                 if r.status_code != 200:
@@ -594,12 +596,21 @@ class GoogleFinanceEngine:
 
         ev_param = "&events=div,split" if include_events else ""
         client = self._get_yahoo_client()
+        now_ts = int(time.time())
+        if rng == "max" and interval in ("1d", "1wk", "1mo"):
+            span_qs = f"period1=0&period2={now_ts}"
+        elif rng in ("5y", "2y") and interval == "1d":
+            days_back = 1830 if rng == "5y" else 732
+            span_qs = f"period1={max(0, now_ts - days_back * 86400)}&period2={now_ts}"
+        else:
+            span_qs = f"range={rng}"
+
         for host in ("query2.finance.yahoo.com", "query1.finance.yahoo.com"):
-            url = f"https://{host}/v8/finance/chart/{symbol}?range={rng}&interval={interval}{ev_param}"
+            url = f"https://{host}/v8/finance/chart/{symbol}?{span_qs}&interval={interval}{ev_param}"
             try:
-                r = client.get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
+                r = client.get(url)
                 if r.status_code == 429:
-                    self._yahoo_cooldown_until = time.time() + 30.0
+                    self._yahoo_cooldown_until = time.time() + 10.0
                     continue
                 if r.status_code == 200:
                     return r.json()
@@ -645,18 +656,27 @@ class GoogleFinanceEngine:
                     self._history_cache[cache_key] = (now, bundle["candles_1d"])
                     return {"candles": bundle["candles_1d"], "meta": bundle["quote"], "events": []}
 
-        # 2) Nasdaq Historical API (up to 10Y daily/weekly/monthly for US stocks & ETFs, no 429s)
-        if not include_events and interval in ("1d", "1wk", "1mo"):
+        # 2) For shorter daily/weekly periods (< 5Y), Nasdaq Historical API has zero rate limits for US tickers;
+        #    for 5Y / MAX (full listing start history), query full exchange span first (period1=0..now).
+        if not include_events and interval in ("1d", "1wk", "1mo") and period.lower() not in ("5y", "max"):
             nas_bars = self._fetch_nasdaq_history_sync(symbol, interval, period)
             if nas_bars:
                 self._history_cache[cache_key] = (now, nas_bars)
                 return {"candles": nas_bars, "meta": {}, "events": []}
 
-        # 3) Public exchange chart fallback over persistent httpx client (with 429 cooldown)
+        # 3) Public exchange chart feed (supports full listing-start history via period1=0..now)
         rng_map = {"1d": "1d", "5d": "5d", "1mo": "1mo", "3mo": "3mo", "6mo": "6mo", "ytd": "ytd", "1y": "1y", "2y": "2y", "5y": "5y", "max": "max"}
         rng = rng_map.get(period.lower(), "3mo")
         payload = self._fetch_yahoo_chart_sync(symbol, interval, rng, include_events)
         result_list = ((payload or {}).get("chart") or {}).get("result") or []
+        if not result_list and symbol.upper().endswith(".BO") and not include_events:
+            payload = self._fetch_yahoo_chart_sync(symbol[:-3] + ".NS", interval, rng, include_events)
+            result_list = ((payload or {}).get("chart") or {}).get("result") or []
+        if not result_list and not include_events and interval in ("1d", "1wk", "1mo") and period.lower() in ("5y", "max"):
+            nas_bars = self._fetch_nasdaq_history_sync(symbol, interval, period)
+            if nas_bars:
+                self._history_cache[cache_key] = (now, nas_bars)
+                return {"candles": nas_bars, "meta": {}, "events": []}
 
         if not result_list:
             # 4) Graceful fallback to Google Finance embedded daily/intraday bars instead of returning empty
@@ -738,6 +758,15 @@ class GoogleFinanceEngine:
         res = self.fetch_public_chart_sync(symbol, interval="1d", period="5d")
         candles = res.get("candles") or []
         meta = res.get("meta") or {}
+        if not candles and not meta.get("regularMarketPrice"):
+            res = self.fetch_public_chart_sync(symbol, interval="1d", period="1mo")
+            candles = res.get("candles") or []
+            meta = res.get("meta") or {}
+        if not candles and not meta.get("regularMarketPrice") and symbol.upper().endswith(".BO"):
+            ns_sym = symbol[:-3] + ".NS"
+            res = self.fetch_public_chart_sync(ns_sym, interval="1d", period="1mo")
+            candles = res.get("candles") or []
+            meta = res.get("meta") or {}
         if not candles and not meta.get("regularMarketPrice"):
             return None
 

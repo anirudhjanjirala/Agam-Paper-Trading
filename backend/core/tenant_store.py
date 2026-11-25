@@ -107,6 +107,7 @@ class TenantPortfolioService:
                 "take_profit": pos.take_profit,
                 "pnl": round(pnl, 2),
                 "pnl_percent": round(pct, 2),
+                "realized_pnl": round(float(pos.realized_pnl or 0.0), 2),
             })
 
         for curr, w in wallets_map.items():
@@ -295,9 +296,11 @@ class TenantPortfolioService:
                 sell_qty = min(quantity, existing.qty)
                 sell_charges = round((exec_price * sell_qty) * 0.001, 2)
                 revenue = (exec_price * sell_qty) - sell_charges
+                realized_delta = (exec_price - existing.avg_entry_price) * sell_qty - sell_charges
                 balance = round(balance + revenue, 2)
                 wallet.balance = balance
                 existing.qty -= sell_qty
+                existing.realized_pnl = round(existing.realized_pnl + realized_delta, 2)
                 if existing.qty <= 0:
                     db.delete(existing)
                     db.flush()

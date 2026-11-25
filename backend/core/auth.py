@@ -9,6 +9,7 @@ import secrets
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 import bcrypt
@@ -20,7 +21,36 @@ from core.database import get_db
 from core.models import RefreshTokenModel, UserModel, UserWatchlistModel, WalletModel
 from core.paper_wallets import DEFAULT_WALLETS
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "agam-dev-secret-change-in-production-2026")
+
+def _load_jwt_secret() -> str:
+    env_secret = os.environ.get("JWT_SECRET", "").strip()
+    is_prod = (
+        os.environ.get("APP_ENV", "").strip().lower() == "production"
+        or os.environ.get("ENV", "").strip().lower() == "production"
+        or os.environ.get("RENDER", "").strip().lower() in ("1", "true")
+        or os.environ.get("DATABASE_URL", "").strip().startswith("postgres")
+    )
+    if env_secret:
+        if is_prod and len(env_secret) < 32:
+            raise RuntimeError("JWT_SECRET must be at least 32 characters in production.")
+        return env_secret
+    if is_prod:
+        raise RuntimeError("JWT_SECRET environment variable must be set in production.")
+    # Local development only: persist a random per-machine secret in a gitignored file.
+    secret_path = Path(__file__).resolve().parent.parent / ".agam_jwt_secret"
+    try:
+        if secret_path.exists():
+            stored = secret_path.read_text(encoding="utf-8").strip()
+            if len(stored) >= 32:
+                return stored
+        generated = secrets.token_urlsafe(48)
+        secret_path.write_text(generated, encoding="utf-8")
+        return generated
+    except OSError:
+        return secrets.token_urlsafe(48)
+
+
+JWT_SECRET = _load_jwt_secret()
 ACCESS_COOKIE_NAME = "agam_access"
 REFRESH_COOKIE_NAME = "agam_refresh"
 ACCESS_TTL_SEC = 60 * 60 * 6  # 6 hours

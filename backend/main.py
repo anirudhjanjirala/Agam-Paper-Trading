@@ -4,6 +4,7 @@ import gc
 import html
 import io
 import json
+import math
 import os
 import threading
 import time
@@ -68,7 +69,10 @@ from engine.google_news import GoogleNewsEngine
 
 app = FastAPI(title="Agam Institutional Multi-Tenant Paper Trading API", version="5.0.0")
 
-_extra_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+_extra_origins = [o.strip().rstrip("/") for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+_frontend_url = os.environ.get("FRONTEND_URL", "").strip().rstrip("/")
+if _frontend_url and _frontend_url not in _extra_origins:
+    _extra_origins.append(_frontend_url)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -76,7 +80,7 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         *_extra_origins,
     ],
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^https://.*\.vercel\.app$",
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -652,29 +656,327 @@ def _to_heikin_ashi(bars: List[dict]) -> List[dict]:
     return ha
 
 
+def _assign_unique_bar_times(items: List[dict], source_bars: List[dict]) -> List[dict]:
+    if not items or not source_bars:
+        return []
+    n_src = len(source_bars)
+    trimmed = items[-n_src:]
+    m = len(trimmed)
+    out: List[dict] = []
+    prev_idx = -1
+    for k, item in enumerate(trimmed):
+        raw_idx = int(item.get("_src_idx", round(k * (n_src - 1) / max(1, m - 1))))
+        max_allowed = n_src - (m - k)
+        assigned_idx = min(max(raw_idx, prev_idx + 1), max_allowed)
+        prev_idx = assigned_idx
+        clean = {key: val for key, val in item.items() if key != "_src_idx"}
+        clean["time"] = source_bars[assigned_idx]["time"]
+        out.append(clean)
+    return out
+
+
+def _price_step(bars: List[dict], divisor: float = 55.0) -> tuple[float, int]:
+    highs = [b["high"] for b in bars]
+    lows = [b["low"] for b in bars]
+    avg_px = sum(b["close"] for b in bars) / max(1, len(bars))
+    dec = 4 if avg_px < 10 else 2
+    rng = max(highs) - min(lows)
+    step = max(0.0005 if dec == 4 else 0.05, round(rng / divisor, dec))
+    return step, dec
+
+
 def _to_renko(bars: List[dict]) -> List[dict]:
     if not bars:
         return []
-    closes = [b["close"] for b in bars]
-    rng = max(closes) - min(closes)
-    brick = max(0.05, round(rng / 35.0, 2))
+    brick, dec = _price_step(bars, 55.0)
     bricks: List[dict] = []
-    cur_level = closes[0]
-    for b in bars:
+    cur_level = bars[0]["close"]
+    for idx, b in enumerate(bars):
         c = b["close"]
         while c >= cur_level + brick:
             nxt = cur_level + brick
-            bricks.append({"time": b["time"], "open": round(cur_level, 2), "high": round(nxt, 2), "low": round(cur_level, 2), "close": round(nxt, 2), "volume": b.get("volume", 0)})
+            bricks.append({
+                "_src_idx": idx,
+                "open": round(cur_level, dec),
+                "high": round(nxt, dec),
+                "low": round(cur_level, dec),
+                "close": round(nxt, dec),
+                "volume": b.get("volume", 0),
+            })
             cur_level = nxt
         while c <= cur_level - brick:
             nxt = cur_level - brick
-            bricks.append({"time": b["time"], "open": round(cur_level, 2), "high": round(cur_level, 2), "low": round(nxt, 2), "close": round(nxt, 2), "volume": b.get("volume", 0)})
+            bricks.append({
+                "_src_idx": idx,
+                "open": round(cur_level, dec),
+                "high": round(cur_level, dec),
+                "low": round(nxt, dec),
+                "close": round(nxt, dec),
+                "volume": b.get("volume", 0),
+            })
             cur_level = nxt
     if not bricks:
         return bars[-20:]
-    trimmed = bricks[-len(bars):]
-    ts_pool = [b["time"] for b in bars[-len(trimmed):]]
-    return [{**bk, "time": ts_pool[i]} for i, bk in enumerate(trimmed)]
+    return _assign_unique_bar_times(bricks, bars)
+
+
+def _to_line_break(bars: List[dict], lines: int = 3) -> List[dict]:
+    if not bars:
+        return []
+    avg_px = sum(b["close"] for b in bars) / max(1, len(bars))
+    dec = 4 if avg_px < 10 else 2
+    blocks: List[dict] = []
+    for idx, b in enumerate(bars):
+        c = round(float(b["close"]), dec)
+        if not blocks:
+            o = round(float(b["open"]), dec)
+            blocks.append({
+                "_src_idx": idx,
+                "open": o,
+                "high": max(o, c),
+                "low": min(o, c),
+                "close": c,
+                "volume": b.get("volume", 0),
+            })
+            continue
+        last = blocks[-1]
+        recent = blocks[-lines:]
+        recent_high = max(max(x["open"], x["close"]) for x in recent)
+        recent_low = min(min(x["open"], x["close"]) for x in recent)
+        is_up = last["close"] >= last["open"]
+        if is_up:
+            if c > last["close"]:
+                o = last["close"]
+                blocks.append({"_src_idx": idx, "open": o, "high": max(o, c), "low": min(o, c), "close": c, "volume": b.get("volume", 0)})
+            elif c < recent_low:
+                o = last["open"]
+                blocks.append({"_src_idx": idx, "open": o, "high": max(o, c), "low": min(o, c), "close": c, "volume": b.get("volume", 0)})
+        else:
+            if c < last["close"]:
+                o = last["close"]
+                blocks.append({"_src_idx": idx, "open": o, "high": max(o, c), "low": min(o, c), "close": c, "volume": b.get("volume", 0)})
+            elif c > recent_high:
+                o = last["open"]
+                blocks.append({"_src_idx": idx, "open": o, "high": max(o, c), "low": min(o, c), "close": c, "volume": b.get("volume", 0)})
+    return _assign_unique_bar_times(blocks, bars) if len(blocks) >= 2 else bars[-20:]
+
+
+def _to_range_bars(bars: List[dict]) -> List[dict]:
+    if not bars:
+        return []
+    step, dec = _price_step(bars, 50.0)
+    rbars: List[dict] = []
+    cur_o = bars[0]["open"]
+    cur_h = cur_o
+    cur_l = cur_o
+    cur_vol = 0
+    for idx, b in enumerate(bars):
+        pts = [
+            round(float(b["open"]), dec),
+            round(float(b["high"] if b["close"] >= b["open"] else b["low"]), dec),
+            round(float(b["low"] if b["close"] >= b["open"] else b["high"]), dec),
+            round(float(b["close"]), dec),
+        ]
+        cur_vol += int(b.get("volume", 0))
+        for px in pts:
+            steps = 0
+            while steps < 200 and len(rbars) < 25000:
+                steps += 1
+                cand_h = max(cur_h, px)
+                cand_l = min(cur_l, px)
+                if cand_h - cand_l < step - (1e-6):
+                    cur_h, cur_l = cand_h, cand_l
+                    break
+                if px >= cur_l + step and cur_h - cur_l < step:
+                    close_at = round(cur_l + step, dec)
+                    high_at = close_at
+                    low_at = round(cur_l, dec)
+                elif px <= cur_h - step and cur_h - cur_l < step:
+                    close_at = round(cur_h - step, dec)
+                    high_at = round(cur_h, dec)
+                    low_at = close_at
+                else:
+                    close_at = px
+                    high_at = round(max(cur_h, close_at), dec)
+                    low_at = round(min(cur_l, close_at), dec)
+                rbars.append({
+                    "_src_idx": idx,
+                    "open": round(cur_o, dec),
+                    "high": high_at,
+                    "low": low_at,
+                    "close": close_at,
+                    "volume": cur_vol,
+                })
+                cur_o = close_at
+                cur_h = close_at
+                cur_l = close_at
+                cur_vol = 0
+                if px == close_at:
+                    break
+    return _assign_unique_bar_times(rbars, bars) if len(rbars) >= 2 else bars[-20:]
+
+
+def _to_kagi(bars: List[dict]) -> List[dict]:
+    if not bars:
+        return []
+    step, dec = _price_step(bars, 32.0)  # ~3% reversal threshold across loaded span
+    lines: List[dict] = []
+    start_px = round(float(bars[0]["close"]), dec)
+    cur_start = start_px
+    cur_end = start_px
+    direction = 0  # 1 up, -1 down
+    shoulder_high = start_px
+    waist_low = start_px
+    is_yang = True
+    last_idx = 0
+
+    for idx, b in enumerate(bars[1:], start=1):
+        c = round(float(b["close"]), dec)
+        if direction == 0:
+            if c >= cur_start + step:
+                direction = 1
+                cur_end = c
+                is_yang = True
+                last_idx = idx
+            elif c <= cur_start - step:
+                direction = -1
+                cur_end = c
+                is_yang = False
+                last_idx = idx
+        elif direction == 1:
+            if c >= cur_end:
+                cur_end = c
+                if c > shoulder_high:
+                    is_yang = True
+                last_idx = idx
+            elif c <= cur_end - step:
+                lines.append({
+                    "_src_idx": last_idx,
+                    "open": cur_start,
+                    "high": max(cur_start, cur_end),
+                    "low": min(cur_start, cur_end),
+                    "close": cur_end,
+                    "volume": b.get("volume", 0),
+                    "trend": "yang" if is_yang else "yin",
+                })
+                shoulder_high = cur_end
+                cur_start = cur_end
+                cur_end = c
+                direction = -1
+                if c < waist_low:
+                    is_yang = False
+                last_idx = idx
+        else:
+            if c <= cur_end:
+                cur_end = c
+                if c < waist_low:
+                    is_yang = False
+                last_idx = idx
+            elif c >= cur_end + step:
+                lines.append({
+                    "_src_idx": last_idx,
+                    "open": cur_start,
+                    "high": max(cur_start, cur_end),
+                    "low": min(cur_start, cur_end),
+                    "close": cur_end,
+                    "volume": b.get("volume", 0),
+                    "trend": "yang" if is_yang else "yin",
+                })
+                waist_low = cur_end
+                cur_start = cur_end
+                cur_end = c
+                direction = 1
+                if c > shoulder_high:
+                    is_yang = True
+                last_idx = idx
+
+    if direction != 0:
+        lines.append({
+            "_src_idx": last_idx,
+            "open": cur_start,
+            "high": max(cur_start, cur_end),
+            "low": min(cur_start, cur_end),
+            "close": cur_end,
+            "volume": bars[-1].get("volume", 0),
+            "trend": "yang" if is_yang else "yin",
+        })
+    return _assign_unique_bar_times(lines, bars) if len(lines) >= 2 else [
+        {**b, "trend": "yang" if b["close"] >= b["open"] else "yin"} for b in bars[-20:]
+    ]
+
+
+def _to_point_and_figure(bars: List[dict], reversal: int = 3) -> List[dict]:
+    if not bars:
+        return []
+    box, dec = _price_step(bars, 45.0)
+    rev_dist = box * reversal
+    cols: List[dict] = []
+
+    def snap(px: float) -> float:
+        return round(math.floor(px / box) * box, dec)
+
+    cur_low = snap(bars[0]["close"])
+    cur_high = cur_low
+    col_type = "X"
+    last_idx = 0
+
+    for idx, b in enumerate(bars[1:], start=1):
+        hi = float(b["high"])
+        lo = float(b["low"])
+        if col_type == "X":
+            new_top = snap(hi)
+            if new_top > cur_high:
+                cur_high = new_top
+                last_idx = idx
+            elif lo <= cur_high - rev_dist:
+                cols.append({
+                    "_src_idx": last_idx,
+                    "open": round(cur_low, dec),
+                    "high": round(cur_high, dec),
+                    "low": round(cur_low, dec),
+                    "close": round(cur_high, dec),
+                    "volume": b.get("volume", 0),
+                    "pnf_type": "X",
+                    "box_size": box,
+                })
+                col_type = "O"
+                cur_high = round(cur_high - box, dec)
+                cur_low = min(cur_high, snap(lo))
+                last_idx = idx
+        else:
+            new_bot = snap(lo)
+            if new_bot < cur_low:
+                cur_low = new_bot
+                last_idx = idx
+            elif hi >= cur_low + rev_dist:
+                cols.append({
+                    "_src_idx": last_idx,
+                    "open": round(cur_high, dec),
+                    "high": round(cur_high, dec),
+                    "low": round(cur_low, dec),
+                    "close": round(cur_low, dec),
+                    "volume": b.get("volume", 0),
+                    "pnf_type": "O",
+                    "box_size": box,
+                })
+                col_type = "X"
+                cur_low = round(cur_low + box, dec)
+                cur_high = max(cur_low, snap(hi))
+                last_idx = idx
+
+    cols.append({
+        "_src_idx": last_idx,
+        "open": round(cur_low if col_type == "X" else cur_high, dec),
+        "high": round(cur_high, dec),
+        "low": round(cur_low, dec),
+        "close": round(cur_high if col_type == "X" else cur_low, dec),
+        "volume": bars[-1].get("volume", 0),
+        "pnf_type": col_type,
+        "box_size": box,
+    })
+    return _assign_unique_bar_times(cols, bars) if len(cols) >= 2 else [
+        {**b, "pnf_type": "X" if b["close"] >= b["open"] else "O", "box_size": box} for b in bars[-20:]
+    ]
 
 
 # -------------------------------------------------------------
@@ -835,6 +1137,14 @@ def get_history(symbol: str, interval: str = "1d", period: str = "1mo", style: s
         return _dedupe_asc_bars(_to_heikin_ashi(bars))
     if style == "renko":
         return _dedupe_asc_bars(_to_renko(bars))
+    if style == "line_break":
+        return _dedupe_asc_bars(_to_line_break(bars))
+    if style == "range_bar":
+        return _dedupe_asc_bars(_to_range_bars(bars))
+    if style == "kagi":
+        return _dedupe_asc_bars(_to_kagi(bars))
+    if style == "point_and_figure":
+        return _dedupe_asc_bars(_to_point_and_figure(bars))
     return bars
 
 

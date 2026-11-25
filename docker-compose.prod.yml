@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-agam_trading}
       POSTGRES_USER: ${POSTGRES_USER:-agam}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agam_prod_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.production}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./backend/migrations/001_multi_tenant_schema.sql:/docker-entrypoint-initdb.d/001_multi_tenant_schema.sql:ro
@@ -35,7 +35,7 @@ services:
     env_file:
       - .env.production
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-agam}:${POSTGRES_PASSWORD:-agam_prod_password}@postgres:5432/${POSTGRES_DB:-agam_trading}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-agam}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.production}@postgres:5432/${POSTGRES_DB:-agam_trading}
       REDIS_URL: redis://redis:6379/0
       PORT: 8000
     depends_on:

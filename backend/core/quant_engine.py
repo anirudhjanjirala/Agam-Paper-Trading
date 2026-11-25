@@ -242,7 +242,7 @@ def compute_indicator(
         loss = np.where(delta < 0, -delta, 0.0)
         avg_g = _ema(gain, period)
         avg_l = _ema(loss, period)
-        rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
+        rs = np.divide(avg_g, avg_l, out=np.full_like(avg_g, 100.0, dtype=float), where=avg_l > 0)
         return 100.0 - (100.0 / (1.0 + rs))
     if fn in ("stoch_k", "stoch_d"):
         k = np.full(n, np.nan)

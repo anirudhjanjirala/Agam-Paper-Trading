@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { Rocket, Sparkles, CheckCircle2 } from "lucide-react";
+import { Rocket, Sparkles, CheckCircle2, RefreshCw } from "lucide-react";
 
 export interface IpoItem {
   id: string;
@@ -21,9 +21,12 @@ export interface IpoItem {
 interface IpoCardListProps {
   ipos: IpoItem[];
   onApplyBid: (ipo: IpoItem) => void;
+  loading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
 }
 
-export default function IpoCardList({ ipos, onApplyBid }: IpoCardListProps) {
+export default function IpoCardList({ ipos, onApplyBid, loading = false, error = null, onRetry }: IpoCardListProps) {
   const [appliedIpos, setAppliedIpos] = useState<Record<string, boolean>>({});
 
   const handleApply = (ipo: IpoItem) => {
@@ -60,7 +63,42 @@ export default function IpoCardList({ ipos, onApplyBid }: IpoCardListProps) {
       </div>
 
       {ipos.length === 0 ? (
-        <div className="py-8 text-center text-xs text-[#787B86]">Loading live IPO filings from NSE & NASDAQ...</div>
+        <div className="py-10 text-center space-y-2.5">
+          {loading ? (
+            <div className="inline-flex items-center gap-2 text-xs text-[#787B86]">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#2962FF]" />
+              <span>Loading live IPO filings from NSE &amp; NASDAQ...</span>
+            </div>
+          ) : error ? (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-[#F23645]">{error}</p>
+              {onRetry && (
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#F0F3FA] hover:bg-[#E0E3EB] text-xs font-semibold text-[#131722] transition"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Retry IPO Feed
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xs text-[#787B86]">No live or upcoming IPO filings available right now.</p>
+              {onRetry && (
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#F0F3FA] hover:bg-[#E0E3EB] text-xs font-semibold text-[#131722] transition"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Refresh IPO Feed
+                </button>
+              )}
+            </div>
+          )}
+        </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {ipos.map((ipo) => {

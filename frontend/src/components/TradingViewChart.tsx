@@ -8,6 +8,7 @@ import {
   LineStyle,
   PriceScaleMode,
   CandlestickSeries,
+  BarSeries,
   LineSeries,
   AreaSeries,
   BaselineSeries,
@@ -18,6 +19,12 @@ import {
   Time,
   ISeriesMarkersPluginApi,
 } from "lightweight-charts";
+import {
+  KagiPointData,
+  KagiSeriesPaneView,
+  PnfColumnData,
+  PointAndFigurePaneView,
+} from "@/components/chartSeriesPlugins";
 import {
   CalendarClock,
   RefreshCw,
@@ -44,6 +51,9 @@ export interface CandleData {
   low: number;
   close: number;
   volume: number;
+  trend?: "yang" | "yin";
+  pnf_type?: "X" | "O";
+  box_size?: number;
 }
 
 interface EventMarkerItem {
@@ -60,9 +70,21 @@ interface DrawnShape {
   y1: number;
   x2: number;
   y2: number;
+  weight?: number;
 }
 
-export type ChartStyle = "candles" | "heikin_ashi" | "renko" | "line" | "area" | "baseline";
+export type ChartStyle =
+  | "candles"
+  | "bar"
+  | "line"
+  | "area"
+  | "heikin_ashi"
+  | "renko"
+  | "point_and_figure"
+  | "kagi"
+  | "line_break"
+  | "range_bar"
+  | "baseline";
 export type TimeframeKey = "10T" | "1s" | "5s" | "1m" | "5m" | "15m" | "1h" | "1D" | "1W" | "1M";
 
 interface TradingViewChartProps {
@@ -101,13 +123,16 @@ function mapTimeframeToParams(tf: TimeframeKey, rng: string): { interval: string
   if (tf === "5m") return { interval: "5m", period: "5d" };
   if (tf === "15m") return { interval: "15m", period: "5d" };
   if (tf === "1h") return { interval: "1h", period: "1mo" };
-  if (tf === "1W") return { interval: "1wk", period: rng === "ALL" || rng === "5Y" ? rng.toLowerCase() : "2y" };
+  if (tf === "1W") {
+    const p = rng === "1Y" ? "1y" : rng === "6M" ? "6mo" : rng === "5Y" ? "5y" : "max";
+    return { interval: "1wk", period: p };
+  }
   if (tf === "1M") return { interval: "1mo", period: "max" };
   const periodMap: Record<string, string> = {
     "1D": "5d", "5D": "1mo", "1M": "1mo", "3M": "3mo", "6M": "6mo",
     YTD: "ytd", "1Y": "1y", "5Y": "5y", ALL: "max",
   };
-  return { interval: "1d", period: periodMap[rng] || "3mo" };
+  return { interval: "1d", period: periodMap[rng] || "max" };
 }
 
 export default function TradingViewChart({
@@ -142,7 +167,7 @@ export default function TradingViewChart({
     initialPriceRef.current = currentPrice;
   }, [currentPrice]);
 
-  const [rangePreset, setRangePreset] = useState<string>("3M");
+  const [rangePreset, setRangePreset] = useState<string>("ALL");
   const [logScale, setLogScale] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -163,12 +188,22 @@ export default function TradingViewChart({
   }>({});
 
   const { theme } = useTheme();
+  const themeRef = useRef(theme);
+  useEffect(() => {
+    themeRef.current = theme;
+  }, [theme]);
+
   const [activeTool, setActiveTool] = useState<"crosshair" | "trend" | "ray" | "fib" | "channel" | "rr">("crosshair");
+  const [lineWeight, setLineWeight] = useState<1 | 2 | 3 | 4>(2);
   const [hideDrawings, setHideDrawings] = useState<boolean>(false);
-  const [drawings, setDrawings] = useState<DrawnShape[]>([]);
-  const [redoStack, setRedoStack] = useState<DrawnShape[]>([]);
+  const [drawingsBySymbol, setDrawingsBySymbol] = useState<Record<string, DrawnShape[]>>({});
+  const [redoBySymbol, setRedoBySymbol] = useState<Record<string, DrawnShape[]>>({});
   const [draftShape, setDraftShape] = useState<DrawnShape | null>(null);
-  const layoutLoadedRef = useRef<boolean>(false);
+  const indicatorsLoadedRef = useRef<boolean>(false);
+  const loadedDrawingSymbolsRef = useRef<Record<string, boolean>>({});
+
+  const drawings = drawingsBySymbol[symbol] ?? [];
+  const redoStack = redoBySymbol[symbol] ?? [];
 
   const [loadedChart, setLoadedChart] = useState<{
     symbol: string;
@@ -185,30 +220,29 @@ export default function TradingViewChart({
     };
   }, []);
 
-  // Load user cloud-synced drawings & indicators once
+  // Load user global indicator preference once
   useEffect(() => {
     let mounted = true;
     authFetch("/api/user/layouts?layout_name=default")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!mounted || !d) return;
-        if (Array.isArray(d.drawings)) setDrawings(d.drawings);
         if (Array.isArray(d.active_indicators) && d.active_indicators.length > 0) {
           setActiveChain(d.active_indicators);
         }
-        layoutLoadedRef.current = true;
+        indicatorsLoadedRef.current = true;
       })
       .catch(() => {
-        layoutLoadedRef.current = true;
+        indicatorsLoadedRef.current = true;
       });
     return () => {
       mounted = false;
     };
   }, []);
 
-  // Debounced auto-save of user drawings & indicators to backend
+  // Save global indicator preference cleanly without touching per-symbol drawings
   useEffect(() => {
-    if (!layoutLoadedRef.current) return;
+    if (!indicatorsLoadedRef.current) return;
     const t = setTimeout(() => {
       authFetch("/api/user/layouts", {
         method: "PUT",
@@ -217,15 +251,62 @@ export default function TradingViewChart({
           layout_name: "default",
           symbol,
           grid_type: "1x1",
-          drawings,
+          drawings: [],
           active_indicators: activeChain,
         }),
       }).catch(() => {});
     }, 800);
     return () => clearTimeout(t);
-  }, [drawings, activeChain, symbol]);
+  }, [activeChain, symbol]);
 
-  // Universal Chart Hotkeys: Alt+H (horizontal ray), Ctrl+Z (undo drawing), Ctrl+Y (redo drawing)
+  // Load strict per-symbol drawings (preventing any cross-symbol drawing leakage)
+  useEffect(() => {
+    if (!symbol) return;
+    const controller = new AbortController();
+    const layoutKey = `chart:${symbol.slice(0, 56)}`;
+    authFetch(`/api/user/layouts?layout_name=${encodeURIComponent(layoutKey)}`, { signal: controller.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (controller.signal.aborted) return;
+        const loaded = Array.isArray(d?.drawings) ? (d.drawings as DrawnShape[]) : [];
+        setDrawingsBySymbol((prev) => {
+          if (prev[symbol] && prev[symbol].length > 0 && loaded.length === 0) return prev;
+          return { ...prev, [symbol]: loaded };
+        });
+        loadedDrawingSymbolsRef.current[symbol] = true;
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          loadedDrawingSymbolsRef.current[symbol] = true;
+        }
+      });
+    return () => {
+      controller.abort();
+    };
+  }, [symbol]);
+
+  // Debounced auto-save of per-symbol drawings to backend
+  useEffect(() => {
+    if (!symbol || !loadedDrawingSymbolsRef.current[symbol]) return;
+    const symDrawings = drawingsBySymbol[symbol] ?? [];
+    const layoutKey = `chart:${symbol.slice(0, 56)}`;
+    const t = setTimeout(() => {
+      authFetch("/api/user/layouts", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          layout_name: layoutKey,
+          symbol,
+          grid_type: "1x1",
+          drawings: symDrawings,
+          active_indicators: activeChain,
+        }),
+      }).catch(() => {});
+    }, 600);
+    return () => clearTimeout(t);
+  }, [drawingsBySymbol, activeChain, symbol]);
+
+  // Universal Chart Hotkeys: Alt+H (horizontal ray), Ctrl+Z (undo symbol drawing), Ctrl+Y (redo symbol drawing)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -235,25 +316,27 @@ export default function TradingViewChart({
         setActiveTool((prev) => (prev === "ray" ? "crosshair" : "ray"));
       } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z") {
         e.preventDefault();
-        setDrawings((prev) => {
-          if (prev.length === 0) return prev;
-          const last = prev[prev.length - 1];
-          setRedoStack((r) => [...r, last]);
-          return prev.slice(0, -1);
+        setDrawingsBySymbol((prev) => {
+          const cur = prev[symbol] ?? [];
+          if (cur.length === 0) return prev;
+          const last = cur[cur.length - 1];
+          setRedoBySymbol((r) => ({ ...r, [symbol]: [...(r[symbol] ?? []), last] }));
+          return { ...prev, [symbol]: cur.slice(0, -1) };
         });
       } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "y" || (e.shiftKey && e.key.toLowerCase() === "z"))) {
         e.preventDefault();
-        setRedoStack((prev) => {
-          if (prev.length === 0) return prev;
-          const restored = prev[prev.length - 1];
-          setDrawings((d) => [...d, restored]);
-          return prev.slice(0, -1);
+        setRedoBySymbol((prev) => {
+          const curRedo = prev[symbol] ?? [];
+          if (curRedo.length === 0) return prev;
+          const restored = curRedo[curRedo.length - 1];
+          setDrawingsBySymbol((d) => ({ ...d, [symbol]: [...(d[symbol] ?? []), restored] }));
+          return { ...prev, [symbol]: curRedo.slice(0, -1) };
         });
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [symbol]);
 
   // Instant zero-flicker Dark/Light theme application on chart instance
   useEffect(() => {
@@ -284,7 +367,15 @@ export default function TradingViewChart({
     if (!symbol) return;
     const controller = new AbortController();
     const { interval, period } = mapTimeframeToParams(timeframe, rangePreset);
-    const apiStyle = chartStyle === "heikin_ashi" ? "heikin_ashi" : chartStyle === "renko" ? "renko" : "candles";
+    const derivedApiStyles = new Set<ChartStyle>([
+      "heikin_ashi",
+      "renko",
+      "point_and_figure",
+      "kagi",
+      "line_break",
+      "range_bar",
+    ]);
+    const apiStyle = derivedApiStyles.has(chartStyle) ? chartStyle : "candles";
 
     fetch(
       apiUrl(`/api/history/${encodeURIComponent(symbol)}?interval=${interval}&period=${period}&style=${apiStyle}`),
@@ -377,19 +468,20 @@ export default function TradingViewChart({
 
     const initW = chartContainerRef.current.clientWidth || 720;
     const initH = chartContainerRef.current.clientHeight || 420;
+    const isDarkInit = themeRef.current === "dark";
 
     const chart = createChart(chartContainerRef.current, {
       width: initW,
       height: initH,
       layout: {
-        background: { type: ColorType.Solid, color: "#FFFFFF" },
-        textColor: "#131722",
+        background: { type: ColorType.Solid, color: isDarkInit ? "#0B0E14" : "#FFFFFF" },
+        textColor: isDarkInit ? "#D1D4DC" : "#131722",
         fontSize: 11,
         attributionLogo: false,
       },
       grid: {
-        vertLines: { color: "#F0F3FA" },
-        horzLines: { color: "#F0F3FA" },
+        vertLines: { color: isDarkInit ? "#1E222D" : "#F0F3FA" },
+        horzLines: { color: isDarkInit ? "#1E222D" : "#F0F3FA" },
       },
       crosshair: {
         mode: 1,
@@ -397,16 +489,16 @@ export default function TradingViewChart({
         horzLine: { color: "#9598A1", width: 1, style: LineStyle.Dotted, labelBackgroundColor: "#131722" },
       },
       rightPriceScale: {
-        borderColor: "#E0E3EB",
+        borderColor: isDarkInit ? "#2A2E39" : "#E0E3EB",
         scaleMargins: { top: 0.14, bottom: 0.22 },
       },
       leftPriceScale: {
         visible: false,
-        borderColor: "#E0E3EB",
+        borderColor: isDarkInit ? "#2A2E39" : "#E0E3EB",
         scaleMargins: { top: 0.16, bottom: 0.22 },
       },
       timeScale: {
-        borderColor: "#E0E3EB",
+        borderColor: isDarkInit ? "#2A2E39" : "#E0E3EB",
         timeVisible: true,
         secondsVisible: false,
       },
@@ -425,6 +517,12 @@ export default function TradingViewChart({
 
     if (chartStyle === "line") {
       mainSeriesRef.current = chart.addSeries(LineSeries, { color: "#2962FF", lineWidth: 2 });
+    } else if (chartStyle === "bar") {
+      mainSeriesRef.current = chart.addSeries(BarSeries, {
+        upColor: "#089981",
+        downColor: "#F23645",
+        thinBars: false,
+      });
     } else if (chartStyle === "area") {
       mainSeriesRef.current = chart.addSeries(AreaSeries, {
         topColor: "rgba(41, 98, 255, 0.22)",
@@ -442,6 +540,10 @@ export default function TradingViewChart({
         bottomFillColor1: "rgba(242, 54, 69, 0.0)",
         bottomFillColor2: "rgba(242, 54, 69, 0.2)",
       });
+    } else if (chartStyle === "kagi") {
+      mainSeriesRef.current = chart.addCustomSeries(new KagiSeriesPaneView()) as unknown as ISeriesApi<SeriesType>;
+    } else if (chartStyle === "point_and_figure") {
+      mainSeriesRef.current = chart.addCustomSeries(new PointAndFigurePaneView()) as unknown as ISeriesApi<SeriesType>;
     } else {
       mainSeriesRef.current = chart.addSeries(CandlestickSeries, {
         upColor: "#089981",
@@ -525,6 +627,27 @@ export default function TradingViewChart({
       if (chartStyle === "baseline" && bars.length > 0) {
         mainSeriesRef.current.applyOptions({ baseValue: { type: "price", price: bars[0].open } });
       }
+    } else if (chartStyle === "kagi") {
+      const kagiRows: KagiPointData[] = bars.map((c) => ({
+        time: c.time as Time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        trend: c.trend,
+      }));
+      (mainSeriesRef.current as unknown as ISeriesApi<"Custom">).setData(kagiRows);
+    } else if (chartStyle === "point_and_figure") {
+      const pnfRows: PnfColumnData[] = bars.map((c) => ({
+        time: c.time as Time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        pnf_type: c.pnf_type,
+        box_size: c.box_size,
+      }));
+      (mainSeriesRef.current as unknown as ISeriesApi<"Custom">).setData(pnfRows);
     } else {
       mainSeriesRef.current.setData(
         bars.map((c) => ({ time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close }))
@@ -557,17 +680,24 @@ export default function TradingViewChart({
       }
     }
 
+    const isDerivedBrickStyle =
+      chartStyle === "renko" ||
+      chartStyle === "point_and_figure" ||
+      chartStyle === "kagi" ||
+      chartStyle === "line_break" ||
+      chartStyle === "range_bar";
+
     const controller = new AbortController();
     const isOsc = isOscillatorChain(activeChain);
     chartRef.current?.applyOptions({
-      leftPriceScale: { visible: isOsc, borderColor: "#E0E3EB", scaleMargins: { top: 0.16, bottom: 0.22 } },
+      leftPriceScale: { visible: !isDerivedBrickStyle && isOsc, borderColor: "#E0E3EB", scaleMargins: { top: 0.16, bottom: 0.22 } },
     });
     overlayLineRef.current?.applyOptions({
       priceScaleId: isOsc ? "left" : "right",
       color: isOsc ? "#F59E0B" : "#2962FF",
     });
 
-    if (activeChain.length > 0 && overlayLineRef.current) {
+    if (!isDerivedBrickStyle && activeChain.length > 0 && overlayLineRef.current) {
       const { interval, period } = mapTimeframeToParams(timeframe, rangePreset);
       fetch(apiUrl("/api/indicators/compute"), {
         method: "POST",
@@ -599,6 +729,15 @@ export default function TradingViewChart({
     if (loading || loadedChart.symbol !== symbol || loadedChart.candles.length === 0 || !currentPrice || !mainSeriesRef.current) {
       return;
     }
+    if (
+      chartStyle === "renko" ||
+      chartStyle === "point_and_figure" ||
+      chartStyle === "kagi" ||
+      chartStyle === "line_break" ||
+      chartStyle === "range_bar"
+    ) {
+      return;
+    }
     const last = loadedChart.candles[loadedChart.candles.length - 1];
     try {
       if (chartStyle === "line" || chartStyle === "area" || chartStyle === "baseline") {
@@ -622,7 +761,7 @@ export default function TradingViewChart({
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    setDraftShape({ id: `drw-${Date.now()}`, tool: activeTool, x1: x, y1: y, x2: x, y2: y });
+    setDraftShape({ id: `drw-${Date.now()}`, tool: activeTool, x1: x, y1: y, x2: x, y2: y, weight: lineWeight });
   };
 
   const handleCanvasMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
@@ -633,8 +772,12 @@ export default function TradingViewChart({
 
   const handleCanvasMouseUp = () => {
     if (draftShape) {
-      setDrawings((prev) => [...prev, draftShape]);
-      setRedoStack([]);
+      const completed = draftShape;
+      setDrawingsBySymbol((prev) => ({
+        ...prev,
+        [symbol]: [...(prev[symbol] ?? []), completed],
+      }));
+      setRedoBySymbol((prev) => ({ ...prev, [symbol]: [] }));
       setDraftShape(null);
     }
   };
@@ -653,10 +796,10 @@ export default function TradingViewChart({
 
   return (
     <div className="flex-1 min-h-0 flex gap-[4px] bg-[#EBECEF]">
-      {/* TradingView Left Drawing Toolbar (52px Fixed Strip) */}
+      {/* TradingView Left Drawing Toolbar (42px mobile / 52px desktop) */}
       <aside
         aria-label="Chart Drawing Tools"
-        className="w-[52px] bg-[#FFFFFF] flex flex-col items-center py-2 gap-1 shrink-0 select-none"
+        className="w-[42px] sm:w-[52px] bg-[#FFFFFF] flex flex-col items-center py-2 gap-1 shrink-0 select-none"
       >
         {(
           [
@@ -690,6 +833,32 @@ export default function TradingViewChart({
 
         <div className="w-6 h-[1px] bg-[#E0E3EB] my-1.5" />
 
+        {/* Line Weight Selector (1px - 4px) */}
+        <div className="flex flex-col items-center gap-1 py-0.5" role="group" aria-label="Line Weight">
+          {([1, 2, 3, 4] as const).map((w) => (
+            <button
+              key={w}
+              type="button"
+              onClick={() => setLineWeight(w)}
+              aria-label={`Line Weight ${w}px`}
+              title={`Line Weight ${w}px`}
+              className={`w-[32px] h-[18px] rounded flex items-center justify-center transition ${
+                lineWeight === w ? "bg-[#F0F3FA] ring-1 ring-[#2962FF]" : "hover:bg-[#F8F9FD]"
+              }`}
+            >
+              <span
+                className="w-4 rounded-full bg-current block"
+                style={{
+                  height: `${w}px`,
+                  color: lineWeight === w ? "#2962FF" : "#6A6D78",
+                }}
+              />
+            </button>
+          ))}
+        </div>
+
+        <div className="w-6 h-[1px] bg-[#E0E3EB] my-1" />
+
         <button
           type="button"
           onClick={() => setHideDrawings((v) => !v)}
@@ -705,12 +874,12 @@ export default function TradingViewChart({
         <button
           type="button"
           onClick={() => {
-            setDrawings([]);
-            setRedoStack([]);
+            setDrawingsBySymbol((prev) => ({ ...prev, [symbol]: [] }));
+            setRedoBySymbol((prev) => ({ ...prev, [symbol]: [] }));
             setActiveTool("crosshair");
           }}
           aria-label="Remove Objects"
-          title={`Remove All Drawings (${drawings.length} active, ${redoStack.length} redo)`}
+          title={`Remove ${symbol} Drawings (${drawings.length} active, ${redoStack.length} redo)`}
           className="w-[38px] h-[38px] rounded-lg flex items-center justify-center text-[#6A6D78] hover:bg-[#FFEBEE] hover:text-[#F23645] transition"
         >
           <Trash2 className="w-[18px] h-[18px]" />
@@ -858,17 +1027,18 @@ export default function TradingViewChart({
           >
             {!hideDrawings &&
               [...drawings, ...(draftShape ? [draftShape] : [])].map((d) => {
+                const sw = d.weight || 2;
                 if (d.tool === "trend") {
-                  return <line key={d.id} x1={d.x1} y1={d.y1} x2={d.x2} y2={d.y2} stroke="#2962FF" strokeWidth={2} />;
+                  return <line key={d.id} x1={d.x1} y1={d.y1} x2={d.x2} y2={d.y2} stroke="#2962FF" strokeWidth={sw} />;
                 }
                 if (d.tool === "ray") {
-                  return <line key={d.id} x1={d.x1} y1={d.y1} x2={2400} y2={d.y1} stroke="#089981" strokeWidth={1.5} strokeDasharray="4 4" />;
+                  return <line key={d.id} x1={d.x1} y1={d.y1} x2={2400} y2={d.y1} stroke="#089981" strokeWidth={sw} strokeDasharray="4 4" />;
                 }
                 if (d.tool === "channel") {
                   return (
                     <g key={d.id}>
-                      <line x1={d.x1} y1={d.y1} x2={d.x2} y2={d.y2} stroke="#2962FF" strokeWidth={2} />
-                      <line x1={d.x1} y1={d.y1 + 36} x2={d.x2} y2={d.y2 + 36} stroke="#2962FF" strokeWidth={1.5} strokeDasharray="3 3" />
+                      <line x1={d.x1} y1={d.y1} x2={d.x2} y2={d.y2} stroke="#2962FF" strokeWidth={sw} />
+                      <line x1={d.x1} y1={d.y1 + 36} x2={d.x2} y2={d.y2 + 36} stroke="#2962FF" strokeWidth={Math.max(1, sw - 0.5)} strokeDasharray="3 3" />
                     </g>
                   );
                 }
@@ -879,7 +1049,7 @@ export default function TradingViewChart({
                     <g key={d.id}>
                       {ratios.map((r) => (
                         <g key={r}>
-                          <line x1={Math.min(d.x1, d.x2)} y1={d.y1 + dy * r} x2={Math.max(d.x1, d.x2)} y2={d.y1 + dy * r} stroke="#2962FF" strokeWidth={1} strokeOpacity={0.7} />
+                          <line x1={Math.min(d.x1, d.x2)} y1={d.y1 + dy * r} x2={Math.max(d.x1, d.x2)} y2={d.y1 + dy * r} stroke="#2962FF" strokeWidth={Math.max(1, sw - 0.5)} strokeOpacity={0.7} />
                           <text x={Math.min(d.x1, d.x2) + 4} y={d.y1 + dy * r - 3} fill="#2962FF" fontSize={10}>
                             {(r * 100).toFixed(1)}%
                           </text>
@@ -893,8 +1063,8 @@ export default function TradingViewChart({
                 const w = Math.max(40, Math.abs(d.x2 - d.x1));
                 return (
                   <g key={d.id}>
-                    <rect x={Math.min(d.x1, d.x2)} y={topY} width={w} height={h * 0.65} fill="rgba(8,153,129,0.18)" stroke="#089981" />
-                    <rect x={Math.min(d.x1, d.x2)} y={topY + h * 0.65} width={w} height={h * 0.35} fill="rgba(242,54,69,0.18)" stroke="#F23645" />
+                    <rect x={Math.min(d.x1, d.x2)} y={topY} width={w} height={h * 0.65} fill="rgba(8,153,129,0.18)" stroke="#089981" strokeWidth={sw} />
+                    <rect x={Math.min(d.x1, d.x2)} y={topY + h * 0.65} width={w} height={h * 0.35} fill="rgba(242,54,69,0.18)" stroke="#F23645" strokeWidth={sw} />
                   </g>
                 );
               })}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -134,18 +135,19 @@ class GlobalUniverseStore:
     def search(self, query: str, region: Optional[str] = None, category: Optional[str] = None, limit: int = 40) -> List[dict]:
         q_upper = query.strip().upper()
         with self._lock:
-            lf = self.df.lazy()
+            base_lf = self.df.lazy()
             if region and region != "ALL":
-                lf = lf.filter(pl.col("region") == region)
+                base_lf = base_lf.filter(pl.col("region") == region)
             if category and category != "all":
-                lf = lf.filter(pl.col("category") == category)
+                base_lf = base_lf.filter(pl.col("category") == category)
+
+            lf = base_lf
             if q_upper:
                 lf = lf.filter(
                     pl.col("symbol").str.to_uppercase().str.contains(q_upper, literal=True)
                     | pl.col("name").str.to_uppercase().str.contains(q_upper, literal=True)
                     | pl.col("isin").str.to_uppercase().str.contains(q_upper, literal=True)
                 )
-            # Prioritize exact prefix & non-zero price
             res = (
                 lf.with_columns(
                     (pl.col("symbol").str.to_uppercase().str.starts_with(q_upper) if q_upper else pl.lit(False)).alias("_exact"),
@@ -156,7 +158,34 @@ class GlobalUniverseStore:
                 .limit(limit)
                 .collect()
             )
-            return res.to_dicts()
+            hits = res.to_dicts()
+
+            # Fallback token-normalized search when user enters punctuation variants (e.g. "E.I.D.-Parry (India) Ltd")
+            if q_upper and len(hits) < 5:
+                stop_words = {"LTD", "LIMITED", "INC", "CORP", "CORPORATION", "PLC", "CO", "THE", "OF", "AND", "INDIA"}
+                raw_tokens = [t for t in re.split(r"[^A-Z0-9]+", q_upper) if len(t) >= 2]
+                tokens = [t for t in raw_tokens if t not in stop_words] or raw_tokens
+                if tokens:
+                    tok_lf = base_lf
+                    for tok in tokens[:4]:
+                        tok_lf = tok_lf.filter(
+                            pl.col("symbol").str.to_uppercase().str.contains(tok, literal=True)
+                            | pl.col("name").str.to_uppercase().str.contains(tok, literal=True)
+                        )
+                    tok_hits = (
+                        tok_lf.with_columns((pl.col("price") > 0).alias("_has_px"))
+                        .sort(["_has_px", "volume"], descending=[True, True])
+                        .drop(["_has_px"])
+                        .limit(limit)
+                        .collect()
+                        .to_dicts()
+                    )
+                    seen_syms = {h["symbol"] for h in hits}
+                    for th in tok_hits:
+                        if th["symbol"] not in seen_syms:
+                            seen_syms.add(th["symbol"])
+                            hits.append(th)
+            return hits[:limit]
 
     def list_instruments(
         self,

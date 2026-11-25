@@ -91,6 +91,15 @@ export default function Home() {
   const [bottomExpanded, setBottomExpanded] = useState<boolean>(false);
   const [bottomTab, setBottomTab] = useState<BottomDrawerTab>("paper");
 
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.innerWidth < 768) {
+      const timer = setTimeout(() => {
+        setRightTab(null);
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, []);
+
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
   const [searchOpen, setSearchOpen] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>("");
@@ -115,6 +124,8 @@ export default function Home() {
   const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
   const [ordersHistory, setOrdersHistory] = useState<OrderHistoryItem[]>([]);
   const [ipos, setIpos] = useState<IpoItem[]>([]);
+  const [iposLoading, setIposLoading] = useState<boolean>(true);
+  const [iposError, setIposError] = useState<string | null>(null);
   const [macro, setMacro] = useState<MacroData | null>(null);
 
   const [isWsConnected, setIsWsConnected] = useState<boolean>(false);
@@ -257,11 +268,23 @@ export default function Home() {
   }, []);
 
   const fetchIpos = useCallback(async (region: string, signal?: AbortSignal) => {
+    setIposLoading(true);
+    setIposError(null);
     try {
       const res = await fetch(apiUrl(`/api/ipos?country=${region}`), { signal });
-      if (!signal?.aborted && res.ok) setIpos(await res.json());
+      if (signal?.aborted) return;
+      if (!res.ok) {
+        setIposError(`Unable to load live IPO filings (HTTP ${res.status}).`);
+        return;
+      }
+      const data = await res.json();
+      setIpos(Array.isArray(data) ? data : []);
     } catch {
-      // ignore
+      if (!signal?.aborted) {
+        setIposError("Unable to reach the live IPO feed right now.");
+      }
+    } finally {
+      if (!signal?.aborted) setIposLoading(false);
     }
   }, []);
 
@@ -484,7 +507,12 @@ export default function Home() {
     }
   };
 
-  const openSymbolEverywhere = async (symbol: string, overrideName?: string, overrideRegion?: string) => {
+  const openSymbolEverywhere = async (
+    symbol: string,
+    overrideName?: string,
+    overrideRegion?: string,
+    fallbackMeta?: Partial<WatchlistAsset>
+  ) => {
     setSearchOpen(false);
     setSearchQuery("");
     setSearchResults([]);
@@ -508,17 +536,36 @@ export default function Home() {
       return;
     }
 
+    // Immediately switch UI optimistically so searched symbol opens even before quote completes
+    const optimisticAsset: WatchlistAsset = {
+      symbol,
+      name: overrideName || fallbackMeta?.name || localMatch?.name || symbol,
+      region: overrideRegion || fallbackMeta?.region || localMatch?.region,
+      country: overrideRegion || fallbackMeta?.country || localMatch?.country,
+      category: fallbackMeta?.category || localMatch?.category || "stocks",
+      currency: fallbackMeta?.currency || localMatch?.currency || "USD",
+      exchange: fallbackMeta?.exchange || localMatch?.exchange || "Market",
+      price: localMatch?.price || 0,
+      prev_close: localMatch?.prev_close || 0,
+      change: localMatch?.change || 0,
+      change_percent: localMatch?.change_percent || 0,
+      volume: localMatch?.volume || 0,
+    };
+    applyAsset(optimisticAsset);
+
     try {
       const res = await fetch(apiUrl(`/api/quote/${encodeURIComponent(symbol)}`));
       if (res.ok) {
         setBackendOffline(false);
         const fetched: WatchlistAsset = await res.json();
         const fullAsset: WatchlistAsset = { ...fetched, name: overrideName || fetched.name };
-        applyAsset(fullAsset);
+        if (selectedSymbolRef.current === symbol) {
+          applyAsset(fullAsset);
+        }
         setAssets((prev) => (prev.some((a) => a.symbol === fullAsset.symbol) ? prev : [fullAsset, ...prev]));
       }
     } catch {
-      setBackendOffline(true);
+      // keep optimistic selection; chart will still load /api/history/{symbol}
     }
   };
 
@@ -594,10 +641,10 @@ export default function Home() {
     <div className="h-screen w-screen overflow-hidden flex flex-col bg-[#EBECEF] text-[#131722] select-none">
       {/* TradingView Exact Top Toolbar (38-40px fixed height) */}
       <header className="h-[40px] bg-[#FFFFFF] px-2 flex items-center justify-between gap-2 shrink-0 border-b border-[#E0E3EB] relative z-50">
-        {/* Left Control Cluster */}
+        {/* Hamburger Menu + Scrollable Left Control Cluster */}
         <div className="flex items-center gap-0.5 min-w-0 flex-1">
-          {/* Hamburger Menu + AGAM Badge */}
-          <div className="relative">
+          {/* Hamburger Menu + AGAM Badge (outside overflow container so dropdown is never clipped) */}
+          <div className="relative shrink-0">
             <button
               type="button"
               onClick={() => setMenuOpen((o) => !o)}
@@ -707,18 +754,19 @@ export default function Home() {
             )}
           </div>
 
-          {/* Symbol Search Trigger Pill (TradingView Style) */}
-          <button
-            type="button"
-            onClick={() => setSearchOpen(true)}
-            aria-label="Search Symbols"
-            title="Search Symbol Universe (Ctrl+K)"
-            className="h-[28px] px-2 rounded-lg bg-[#F0F3FA] hover:bg-[#E0E3EB] text-[#131722] text-xs font-bold flex items-center gap-1.5 transition shrink-0"
-          >
-            <Search className="w-3.5 h-3.5 text-[#787B86]" />
-            <span className="font-mono">{selectedAsset?.symbol || "SEARCH"}</span>
-            <span className="hidden 2xl:inline text-[10px] text-[#787B86] font-normal ml-0.5">Ctrl+K</span>
-          </button>
+          <div className="flex items-center gap-0.5 min-w-0 flex-1 overflow-x-auto scrollbar-none">
+            {/* Symbol Search Trigger Pill (TradingView Style) */}
+            <button
+              type="button"
+              onClick={() => setSearchOpen(true)}
+              aria-label="Search Symbols"
+              title="Search Symbol Universe (Ctrl+K)"
+              className="h-[28px] px-2 rounded-lg bg-[#F0F3FA] hover:bg-[#E0E3EB] text-[#131722] text-xs font-bold flex items-center gap-1.5 transition shrink-0"
+            >
+              <Search className="w-3.5 h-3.5 text-[#787B86] shrink-0" />
+              <span className="font-mono max-w-[74px] sm:max-w-none truncate">{selectedAsset?.symbol || "SEARCH"}</span>
+              <span className="hidden 2xl:inline text-[10px] text-[#787B86] font-normal ml-0.5">Ctrl+K</span>
+            </button>
 
           <div className="h-5 w-[1px] bg-[#E0E3EB] mx-0.5 hidden sm:block shrink-0" />
 
@@ -775,17 +823,22 @@ export default function Home() {
               }}
               className="h-[28px] appearance-none bg-transparent hover:bg-[#F0F3FA] rounded-lg pl-2 pr-5 text-xs font-semibold text-[#131722] outline-none cursor-pointer whitespace-nowrap"
             >
-              <option value="candles">Candles</option>
-              <option value="heikin_ashi">Heikin-Ashi</option>
-              <option value="renko">Renko</option>
-              <option value="line">Line</option>
-              <option value="area">Area</option>
-              <option value="baseline">Baseline</option>
+              <option value="candles">Candlestick Chart</option>
+              <option value="bar">Bar Chart (OHLC)</option>
+              <option value="line">Line Chart</option>
+              <option value="area">Area Chart</option>
+              <option value="heikin_ashi">Heikin-Ashi Chart</option>
+              <option value="renko">Renko Chart</option>
+              <option value="point_and_figure">Point &amp; Figure Chart</option>
+              <option value="kagi">Kagi Chart</option>
+              <option value="line_break">Line Break Chart</option>
+              <option value="range_bar">Range Bar Chart</option>
+              <option value="baseline">Baseline Chart</option>
             </select>
             <ChevronDown className="w-3 h-3 text-[#787B86] pointer-events-none absolute right-1" />
           </div>
 
-          <div className="h-5 w-[1px] bg-[#E0E3EB] mx-1 hidden lg:block" />
+          <div className="h-5 w-[1px] bg-[#E0E3EB] mx-1 hidden lg:block shrink-0" />
 
           {/* fx Indicators */}
           <button
@@ -808,7 +861,7 @@ export default function Home() {
               setActiveView("chart");
               setRightTab("alerts");
             }}
-            className="h-[28px] px-2 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold hidden lg:flex items-center gap-1 transition"
+            className="h-[28px] px-2 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold hidden lg:flex items-center gap-1 shrink-0 transition"
           >
             <Bell className="w-3.5 h-3.5 text-[#6A6D78]" />
             <span>Alert</span>
@@ -822,7 +875,7 @@ export default function Home() {
               setBottomTab("replay");
               setBottomOpen(true);
             }}
-            className="h-[28px] px-2 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold hidden lg:flex items-center gap-1 transition"
+            className="h-[28px] px-2 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold hidden lg:flex items-center gap-1 shrink-0 transition"
           >
             <PlayCircle className="w-3.5 h-3.5 text-[#6A6D78]" />
             <span>Replay</span>
@@ -834,12 +887,13 @@ export default function Home() {
             onClick={() => setActiveView(activeView === "multichart" ? "chart" : "multichart")}
             aria-label="16-Chart Split Layout"
             title="16-Chart Split Workspace"
-            className={`h-[28px] px-2 rounded-lg text-xs font-semibold hidden xl:flex items-center gap-1 transition ${
+            className={`h-[28px] px-2 rounded-lg text-xs font-semibold hidden xl:flex items-center gap-1 shrink-0 transition ${
               activeView === "multichart" ? "bg-[#F0F3FA] text-[#2962FF]" : "text-[#131722] hover:bg-[#F0F3FA]"
             }`}
           >
             <Grid className="w-3.5 h-3.5" />
           </button>
+          </div>
         </div>
 
         {/* Right Utility & Paper Wallet Cluster */}
@@ -876,10 +930,10 @@ export default function Home() {
           {/* Compact Paper Wallet + Currency + Reset */}
           <div className="h-[28px] bg-[#F0F3FA] rounded-lg px-2 flex items-center gap-1.5 text-xs shrink-0">
             <Wallet className="w-3.5 h-3.5 text-[#2962FF] shrink-0" />
-            <span suppressHydrationWarning className="font-mono font-bold text-[#131722] tabular-nums whitespace-nowrap">
+            <span suppressHydrationWarning className="hidden sm:inline font-mono font-bold text-[#131722] tabular-nums whitespace-nowrap">
               {currSymbol}{formatNumber(currentBalance, 2)}
             </span>
-            <span className="h-3.5 w-[1px] bg-[#D1D4DC]" />
+            <span className="hidden sm:inline h-3.5 w-[1px] bg-[#D1D4DC]" />
             <div className="relative inline-flex items-center shrink-0">
               <select
                 aria-label="Wallet Currency"
@@ -1146,6 +1200,9 @@ export default function Home() {
             )}
             <IpoCardList
               ipos={ipos}
+              loading={iposLoading}
+              error={iposError}
+              onRetry={() => fetchIpos(selectedCountry)}
               onApplyBid={(ipo) => {
                 setIpoNotice(`Virtual IPO bid applied for ${ipo.company} (${ipo.price_band}).`);
                 setTimeout(() => setIpoNotice(null), 5000);
@@ -1245,7 +1302,14 @@ export default function Home() {
                 <button
                   key={res.symbol}
                   type="button"
-                  onClick={() => openSymbolEverywhere(res.symbol, res.name, res.region)}
+                  onClick={() =>
+                    openSymbolEverywhere(res.symbol, res.name, res.region, {
+                      exchange: res.exchange,
+                      currency: res.currency,
+                      category: res.category,
+                      region: res.region,
+                    })
+                  }
                   className="w-full px-4 py-2.5 hover:bg-[#F0F3FA] flex items-center justify-between gap-3 text-left transition"
                 >
                   <div className="flex items-center gap-3 min-w-0">

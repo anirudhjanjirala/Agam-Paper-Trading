@@ -159,9 +159,9 @@ export default function RightSidebar({
 
   return (
     <div className="flex h-full shrink-0">
-      {/* Collapsible 310px Right Docked Panel */}
+      {/* Collapsible Right Docked Panel (overlay drawer on mobile, docked on md+) */}
       {activeTab !== null && (
-        <aside className="w-[310px] sm:w-[320px] bg-[#FFFFFF] flex flex-col h-full min-h-0 border-r border-[#E0E3EB] overflow-hidden">
+        <aside className="fixed right-[44px] top-[40px] bottom-0 z-40 w-[min(310px,calc(100vw-44px))] shadow-2xl md:shadow-none md:static md:w-[320px] bg-[#FFFFFF] flex flex-col h-auto md:h-full min-h-0 border-l md:border-l-0 border-r border-[#E0E3EB] overflow-hidden">
           {activeTab === "watchlist" && (
             <div className="flex flex-col h-full min-h-0">
               {/* Top Half: Watchlist Table */}
