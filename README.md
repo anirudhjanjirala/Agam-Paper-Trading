@@ -14,13 +14,16 @@
   <img src="https://img.shields.io/badge/Backend-FastAPI%20%7C%20SQLAlchemy%20%7C%20Polars-089981" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Charts-10%20Types%20%7C%20Per--Symbol%20Drawings-2962FF" alt="10 Chart Styles" />
   <img src="https://img.shields.io/badge/Data-Zero%20Paid%20APIs-F59E0B" alt="Zero Cost Market Feeds" />
+  <a href="docs/PROJECT_REPORT.md">
+    <img src="https://img.shields.io/badge/Audit%20Report-Passed%20(4.5%2F5)-00C853" alt="Inspection Report" />
+  </a>
   <a href="mailto:anirudhjanjirala@gmail.com">
     <img src="https://img.shields.io/badge/Contact-anirudhjanjirala%40gmail.com-EA4335" alt="Contact Email" />
   </a>
 </p>
 
 <p align="center">
-  <strong>Contact Maintainer (Anirudh Janjirala):</strong> <a href="mailto:anirudhjanjirala@gmail.com">anirudhjanjirala@gmail.com</a> &nbsp;|&nbsp; <a href="https://github.com/anirudhjanjirala/Agam-Paper-Trading">GitHub Repository</a>
+  <strong>Contact Maintainer (Anirudh Janjirala):</strong> <a href="mailto:anirudhjanjirala@gmail.com">anirudhjanjirala@gmail.com</a> &nbsp;|&nbsp; <a href="https://github.com/anirudhjanjirala/Agam-Paper-Trading">GitHub Repository</a> &nbsp;|&nbsp; <a href="docs/PROJECT_REPORT.md"><strong>Full Inspection Report</strong></a>
 </p>
 
 ---
@@ -190,6 +193,7 @@ Agam Paper Trading/
 ├── start_all.bat              # Windows 1-click launcher
 ├── CHANGELOG.md               # Detailed chronological change log
 ├── docker-compose.prod.yml    # PostgreSQL + Redis + FastAPI + Next.js + Nginx stack
+├── docs/PROJECT_REPORT.md     # Full architecture, audit & code inspection report
 ├── docs/screenshots/          # Verified terminal, chart style & mobile screenshots
 ├── backend/
 │   ├── main.py                # FastAPI REST + WebSocket engine & OHLC/custom transforms
