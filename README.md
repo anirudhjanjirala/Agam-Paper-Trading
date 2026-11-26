@@ -220,6 +220,11 @@ For questions, feedback, collaborations, or bug reports, reach out directly:
 - **Email:** [anirudhjanjirala@gmail.com](mailto:anirudhjanjirala@gmail.com)
 - **GitHub:** [anirudhjanjirala/Agam-Paper-Trading](https://github.com/anirudhjanjirala/Agam-Paper-Trading)
 
+### Contributors
+- **Lavan Kumar**
+- **Manoj**
+- **Sai Raju** (Basani Sai Raju)
+
 ---
 
 ## License
