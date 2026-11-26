@@ -221,9 +221,9 @@ For questions, feedback, collaborations, or bug reports, reach out directly:
 - **GitHub:** [anirudhjanjirala/Agam-Paper-Trading](https://github.com/anirudhjanjirala/Agam-Paper-Trading)
 
 ### Contributors
-- **Lavan Kumar**
-- **Manoj**
 - **Sai Raju** (Basani Sai Raju)
+- **Manoj**
+- **Lavan Kumar**
 
 ---
 

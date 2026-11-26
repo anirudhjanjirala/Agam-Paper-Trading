@@ -508,7 +508,7 @@ All checks passed on the final codebase:
 |---|---|
 | **Lead Developer & Architect** | Janjirala Anirudh (`anirudhjanjirala@gmail.com`) |
 | **AI Engineering Assistant** | Google Antigravity (agentic coding AI) |
-| **Contributors** | Lavan Kumar, Manoj, Sai Raju |
+| **Contributors** | Sai Raju, Manoj, Lavan Kumar |
 
 **GitHub:** [github.com/anirudhjanjirala/Agam-Paper-Trading](https://github.com/anirudhjanjirala/Agam-Paper-Trading)
 **License:** MIT
