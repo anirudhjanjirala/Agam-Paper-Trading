@@ -7,6 +7,7 @@ inside a single console window with unified logs and clean shutdown.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -178,12 +179,32 @@ def main() -> int:
     processes.append(frontend_proc)
     threading.Thread(target=stream_output, args=(frontend_proc, "FRONTEND"), daemon=True).start()
 
+    def _launch_desktop_app(url: str) -> None:
+        if "--browser" not in sys.argv:
+            candidates = [
+                shutil.which("msedge"),
+                shutil.which("chrome"),
+                shutil.which("brave"),
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+            ]
+            for exe in candidates:
+                if exe and os.path.exists(exe):
+                    try:
+                        subprocess.Popen([exe, f"--app={url}"])
+                        return
+                    except Exception:
+                        continue
+        webbrowser.open(url)
+
     def open_browser_when_ready() -> None:
         wait_for_http("http://127.0.0.1:8000/api/health", timeout_sec=30.0)
         if wait_for_http("http://localhost:3000", timeout_sec=45.0) and not stop_event.is_set():
             print("\n[AGAM] Both servers ready -> opening http://localhost:3000\n", flush=True)
             if "--no-browser" not in sys.argv:
-                webbrowser.open("http://localhost:3000")
+                _launch_desktop_app("http://localhost:3000")
 
     threading.Thread(target=open_browser_when_ready, daemon=True).start()
 

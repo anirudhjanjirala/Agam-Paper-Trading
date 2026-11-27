@@ -20,6 +20,7 @@ import OrderFlowSuite from "@/components/OrderFlowSuite";
 import AlertManager from "@/components/AlertManager";
 import { formatAssetPrice, formatCompactCurrency, formatNumber } from "@/lib/format";
 import { apiUrl } from "@/lib/api";
+import { CapitalHealthEntry, OrderDraftPreset } from "@/types/trading";
 
 export interface WatchlistAsset {
   symbol: string;
@@ -61,16 +62,23 @@ interface RightSidebarProps {
   assets: WatchlistAsset[];
   selectedAsset: WatchlistAsset | null;
   onSelectSymbol: (symbol: string, name?: string) => void;
+  onQuickTradeFromWatchlist?: (asset: WatchlistAsset, side: "BUY" | "SELL") => void;
   onOpenSearch: () => void;
   wallets: Record<string, number>;
+  capitalHealth?: Record<string, CapitalHealthEntry>;
+  orderPreset?: OrderDraftPreset | null;
   onExecuteOrder: (order: {
     symbol: string;
     quantity: number;
     order_type: "BUY" | "SELL";
-    order_mode: "MARKET" | "LIMIT";
+    order_mode: "MARKET" | "LIMIT" | "STOP";
+    product_type?: "DELIVERY" | "INTRADAY" | "FUTURES" | "OPTIONS";
+    broker_plan?: "DISCOUNT" | "PRO";
     price?: number;
     stop_loss?: number;
     take_profit?: number;
+    trailing_sl?: number;
+    notes?: string;
   }) => Promise<{ success: boolean; message: string }>;
   latestNewsAlert: NewsArticle | null;
   isMarketOpen?: boolean;
@@ -98,8 +106,11 @@ export default function RightSidebar({
   assets,
   selectedAsset,
   onSelectSymbol,
+  onQuickTradeFromWatchlist,
   onOpenSearch,
   wallets,
+  capitalHealth,
+  orderPreset,
   onExecuteOrder,
   latestNewsAlert,
   isMarketOpen,
@@ -146,7 +157,7 @@ export default function RightSidebar({
     badge?: boolean;
   }> = [
     { id: "watchlist", label: "Watchlist & Details", icon: ListFilter },
-    { id: "order", label: "Order Ticket", icon: Zap },
+    { id: "order", label: "FrontPage Order Ticket", icon: Zap },
     {
       id: "news",
       label: "Live News",
@@ -157,28 +168,32 @@ export default function RightSidebar({
     { id: "orderflow", label: "Order Flow", icon: Layers },
   ];
 
+  const resolveOrderWalletBalance = (asset: WatchlistAsset): number => {
+    if (wallets[asset.currency] !== undefined) return wallets[asset.currency];
+    if (asset.currency === "GBp" && wallets["GBP"] !== undefined) return wallets["GBP"] * 100;
+    return wallets["USD"] ?? 0;
+  };
+
   return (
     <div className="flex h-full shrink-0">
-      {/* Collapsible Right Docked Panel (overlay drawer on mobile, docked on md+) */}
       {activeTab !== null && (
-        <aside className="fixed right-[44px] top-[40px] bottom-0 z-40 w-[min(310px,calc(100vw-44px))] shadow-2xl md:shadow-none md:static md:w-[320px] bg-[#FFFFFF] flex flex-col h-auto md:h-full min-h-0 border-l md:border-l-0 border-r border-[#E0E3EB] overflow-hidden">
+        <aside className="fixed right-[44px] top-[74px] bottom-0 z-40 w-[min(325px,calc(100vw-44px))] shadow-2xl md:shadow-none md:static md:w-[335px] bg-[#FFFFFF] flex flex-col h-auto md:h-full min-h-0 border-l md:border-l-0 border-r border-[#E0E3EB] overflow-hidden">
           {activeTab === "watchlist" && (
             <div className="flex flex-col h-full min-h-0">
-              {/* Top Half: Watchlist Table */}
               <div className="flex-1 min-h-0 flex flex-col">
                 <div className="px-3 py-2 border-b border-[#E0E3EB] flex items-center justify-between gap-2 shrink-0">
                   <select
                     aria-label="Watchlist Region"
                     value={selectedCountry}
                     onChange={(e) => onSelectCountry(e.target.value)}
-                    className="bg-transparent text-xs font-bold text-[#131722] outline-none cursor-pointer truncate max-w-[175px]"
+                    className="bg-transparent text-xs font-bold text-[#131722] outline-none cursor-pointer truncate max-w-[185px]"
                   >
-                    <option value="IND">India (NSE/BSE)</option>
-                    <option value="USA">USA (NASDAQ/NYSE)</option>
-                    <option value="CANADA">Canada (TSX/TSXV)</option>
-                    <option value="CHINA">China (SSE/SZSE)</option>
-                    <option value="EU">Europe & UK</option>
-                    <option value="ALL">All Global Markets</option>
+                    <option value="IND">IND · India (NSE/BSE)</option>
+                    <option value="USA">USA · NASDAQ/NYSE</option>
+                    <option value="CANADA">CAN · Canada (TSX)</option>
+                    <option value="CHINA">CHN · China (SSE/SZSE)</option>
+                    <option value="EU">EU · Europe &amp; UK</option>
+                    <option value="ALL">ALL · Global Markets</option>
                   </select>
                   <div className="flex items-center gap-1">
                     <button
@@ -202,7 +217,6 @@ export default function RightSidebar({
                   </div>
                 </div>
 
-                {/* Compact Category Tabs */}
                 <div className="px-2 py-1.5 border-b border-[#E0E3EB] flex items-center gap-1 bg-[#F8F9FD] shrink-0 overflow-x-auto scrollbar-none">
                   {COMPACT_CATEGORIES.map((c) => (
                     <button
@@ -220,15 +234,13 @@ export default function RightSidebar({
                   ))}
                 </div>
 
-                {/* Watchlist Column Headers */}
-                <div className="grid grid-cols-[1fr_72px_58px_56px] px-3 py-1.5 border-b border-[#F0F3FA] text-[10px] font-semibold text-[#787B86] uppercase tracking-wider shrink-0">
+                <div className="grid grid-cols-[1fr_70px_54px_54px] px-3 py-1.5 border-b border-[#F0F3FA] text-[10px] font-semibold text-[#787B86] uppercase tracking-wider shrink-0">
                   <span>Symbol</span>
                   <span className="text-right">Last</span>
                   <span className="text-right">Chg</span>
                   <span className="text-right">Chg%</span>
                 </div>
 
-                {/* Dense Watchlist Rows */}
                 <div className="flex-1 overflow-y-auto divide-y divide-[#F0F3FA]">
                   {assets.length === 0 ? (
                     <div className="py-8 text-center text-xs text-[#787B86]">Loading instruments...</div>
@@ -238,15 +250,14 @@ export default function RightSidebar({
                       const isBull = asset.change >= 0;
                       const chgAbs = Math.abs(asset.change || 0);
                       return (
-                        <button
+                        <div
                           key={asset.symbol}
-                          type="button"
-                          onClick={() => onSelectSymbol(asset.symbol, asset.name)}
-                          className={`w-full grid grid-cols-[1fr_72px_58px_56px] items-center px-3 py-1.5 text-left transition tabular-nums ${
+                          className={`group relative w-full grid grid-cols-[1fr_70px_54px_54px] items-center px-3 py-1.5 text-left transition tabular-nums cursor-pointer ${
                             isSel
                               ? "bg-[#F0F3FA] ring-1 ring-inset ring-[#131722]/30"
                               : "hover:bg-[#F8F9FD]"
                           }`}
+                          onClick={() => onSelectSymbol(asset.symbol, asset.name)}
                         >
                           <div className="min-w-0 pr-1">
                             <span className="text-xs font-bold text-[#131722] block truncate">{asset.symbol}</span>
@@ -267,20 +278,41 @@ export default function RightSidebar({
                               isBull ? "text-[#089981]" : "text-[#F23645]"
                             }`}
                           >
-                            {asset.price > 0
-                              ? `${isBull ? "+" : ""}${(asset.change_percent ?? 0).toFixed(2)}%`
-                              : "--"}
+                            {asset.price > 0 ? `${isBull ? "+" : ""}${(asset.change_percent ?? 0).toFixed(2)}%` : "--"}
                           </span>
-                        </button>
+
+                          {onQuickTradeFromWatchlist && (
+                            <div
+                              className="hidden group-hover:flex items-center gap-1 absolute right-2 top-1/2 -translate-y-1/2 bg-[#FFFFFF]/95 px-1 py-0.5 rounded shadow border border-[#E0E3EB]"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => onQuickTradeFromWatchlist(asset, "BUY")}
+                                className="px-1.5 py-0.5 rounded bg-[#089981] text-white text-[10px] font-black"
+                                title={`Buy ${asset.symbol}`}
+                              >
+                                B
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onQuickTradeFromWatchlist(asset, "SELL")}
+                                className="px-1.5 py-0.5 rounded bg-[#F23645] text-white text-[10px] font-black"
+                                title={`Sell ${asset.symbol}`}
+                              >
+                                S
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       );
                     })
                   )}
                 </div>
               </div>
 
-              {/* Bottom Half: Active Symbol Details Card */}
               {selectedAsset && (
-                <div className="h-[250px] shrink-0 border-t-4 border-[#EBECEF] bg-[#FFFFFF] flex flex-col overflow-y-auto px-3.5 py-2.5 space-y-2.5">
+                <div className="h-[245px] shrink-0 border-t-4 border-[#EBECEF] bg-[#FFFFFF] flex flex-col overflow-y-auto px-3.5 py-2.5 space-y-2">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
@@ -324,7 +356,6 @@ export default function RightSidebar({
                     </span>
                   </div>
 
-                  {/* Key Stats Mini Grid */}
                   <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] pt-1 border-t border-[#F0F3FA]">
                     <div className="flex justify-between">
                       <span className="text-[#787B86]">Volume</span>
@@ -362,7 +393,7 @@ export default function RightSidebar({
                       onClick={() => onSelectTab("order")}
                       className="flex-1 py-1.5 rounded-lg bg-[#2962FF] hover:bg-[#1E53E5] text-white text-xs font-bold transition"
                     >
-                      Open Order Panel
+                      Paper Trade (Buy / Sell)
                     </button>
                     <button
                       type="button"
@@ -378,9 +409,9 @@ export default function RightSidebar({
           )}
 
           {activeTab === "order" && selectedAsset && (
-            <div className="flex-1 overflow-y-auto p-3">
-              <div className="flex items-center justify-between mb-2 pb-2 border-b border-[#E0E3EB]">
-                <span className="text-xs font-bold text-[#131722] uppercase tracking-wider">Order Ticket</span>
+            <div className="flex-1 overflow-y-auto p-2.5">
+              <div className="flex items-center justify-between mb-2 pb-1.5 border-b border-[#E0E3EB]">
+                <span className="text-xs font-black text-[#131722] uppercase tracking-wider">FrontPage Order Ticket</span>
                 <button
                   type="button"
                   onClick={() => onSelectTab(null)}
@@ -391,12 +422,17 @@ export default function RightSidebar({
                 </button>
               </div>
               <OrderDrawer
-                key={selectedAsset.symbol}
+                key={`${selectedAsset.symbol}-${orderPreset?.side || ""}-${orderPreset?.product_type || ""}-${orderPreset?.stop_loss || ""}-${orderPreset?.take_profit || ""}`}
                 symbol={selectedAsset.symbol}
                 name={selectedAsset.name}
                 currentPrice={selectedAsset.price || 0}
                 currency={selectedAsset.currency}
-                walletBalance={wallets[selectedAsset.currency] ?? 100000}
+                country={selectedAsset.region || selectedAsset.country || selectedCountry}
+                exchange={selectedAsset.exchange}
+                category={selectedAsset.category}
+                walletBalance={resolveOrderWalletBalance(selectedAsset)}
+                capitalHealth={capitalHealth?.[selectedAsset.currency]}
+                preset={orderPreset}
                 onExecuteOrder={onExecuteOrder}
               />
             </div>
@@ -422,7 +458,6 @@ export default function RightSidebar({
         </aside>
       )}
 
-      {/* Far-Right 44px Vertical Icon Rail (exact TradingView Chrome) */}
       <nav
         aria-label="Workspace Side Tools"
         className="w-[44px] bg-[#FFFFFF] flex flex-col items-center justify-between py-1.5 shrink-0 border-l border-[#E0E3EB]"
@@ -445,9 +480,7 @@ export default function RightSidebar({
                 }`}
               >
                 <Icon className="w-[18px] h-[18px]" />
-                {btn.badge && (
-                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[#F23645]" />
-                )}
+                {btn.badge && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[#F23645]" />}
               </button>
             );
           })}

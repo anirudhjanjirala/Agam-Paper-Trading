@@ -36,7 +36,6 @@ def _load_jwt_secret() -> str:
         return env_secret
     if is_prod:
         raise RuntimeError("JWT_SECRET environment variable must be set in production.")
-    # Local development only: persist a random per-machine secret in a gitignored file.
     secret_path = Path(__file__).resolve().parent.parent / ".agam_jwt_secret"
     try:
         if secret_path.exists():
@@ -53,8 +52,8 @@ def _load_jwt_secret() -> str:
 JWT_SECRET = _load_jwt_secret()
 ACCESS_COOKIE_NAME = "agam_access"
 REFRESH_COOKIE_NAME = "agam_refresh"
-ACCESS_TTL_SEC = 60 * 60 * 6  # 6 hours
-REFRESH_TTL_DAYS = 14
+ACCESS_TTL_SEC = 60 * 60 * 12  # 12 hours for local PC workstation
+REFRESH_TTL_DAYS = 30
 
 DEFAULT_SEEDED_WATCHLIST = ["RELIANCE.NS", "TCS.NS", "AAPL", "NVDA", "SHOP.TO", "600519.SS", "SAP.DE"]
 
@@ -115,6 +114,32 @@ def _token_hash(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
+def get_pc_owner_user(db: Session) -> Optional[UserModel]:
+    """Returns the primary/oldest registered profile for this local PC installation, if initialized."""
+    return db.scalar(
+        select(UserModel)
+        .where(UserModel.is_guest.is_(False), UserModel.role != "community")
+        .order_by(UserModel.created_at.asc())
+    )
+
+
+def get_pc_profiles(db: Session) -> list[UserModel]:
+    """Returns all registered trader profiles on this PC (no guests or demo community seeds)."""
+    return list(
+        db.scalars(
+            select(UserModel)
+            .where(UserModel.is_guest.is_(False), UserModel.role != "community")
+            .order_by(UserModel.last_login_at.desc(), UserModel.created_at.asc())
+        ).all()
+    )
+
+
+def delete_user_account(db: Session, user: UserModel) -> None:
+    """Deletes a leaving trader's local PC profile and cascading personal records."""
+    db.delete(user)
+    db.commit()
+
+
 def seed_user_workspace(db: Session, user_id: str) -> None:
     existing_wallets = db.scalars(select(WalletModel.currency).where(WalletModel.user_id == user_id)).all()
     existing_set = set(existing_wallets)
@@ -147,18 +172,25 @@ def create_user_account(
     db: Session,
     email: str,
     password: str,
-    base_currency: str = "USD",
+    display_name: str = "Trader",
+    base_currency: str = "INR",
     theme_preference: str = "light",
     is_guest: bool = False,
+    accepted_risk: bool = True,
+    role: str = "trader",
 ) -> UserModel:
+    now = datetime.now(timezone.utc)
     user = UserModel(
         id=str(uuid.uuid4()),
         email=email.strip().lower(),
+        display_name=(display_name or email.split("@")[0]).strip()[:120],
         hashed_password=hash_password(password),
-        role="user",
+        role=role,
         base_currency=base_currency,
         theme_preference=theme_preference,
         is_guest=is_guest,
+        accepted_risk_at=now if accepted_risk else None,
+        last_login_at=now,
     )
     db.add(user)
     db.flush()
@@ -204,7 +236,13 @@ def issue_session_tokens(db: Session, user: UserModel, request: Request, respons
     return {"access_token": access_jwt}
 
 
-def clear_session_cookies(request: Request, response: Response) -> None:
+def clear_session_cookies(request: Request, response: Response, db: Optional[Session] = None) -> None:
+    raw_ref = request.cookies.get(REFRESH_COOKIE_NAME)
+    if db and raw_ref:
+        row = db.scalar(select(RefreshTokenModel).where(RefreshTokenModel.token_hash == _token_hash(raw_ref)))
+        if row:
+            row.revoked = True
+            db.commit()
     is_https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "") == "https" or bool(os.environ.get("RENDER"))
     samesite_mode = "none" if is_https else "lax"
     response.delete_cookie(ACCESS_COOKIE_NAME, path="/", samesite=samesite_mode, secure=is_https)
@@ -220,7 +258,7 @@ def rotate_refresh_token(db: Session, raw_refresh: str, request: Request, respon
         return None
     row.revoked = True
     user = db.get(UserModel, row.user_id)
-    if not user:
+    if not user or user.is_guest or user.role == "community":
         db.commit()
         return None
     tokens = issue_session_tokens(db, user, request, response)
@@ -241,26 +279,13 @@ def get_optional_user(request: Request, db: Session = Depends(get_db)) -> Option
     payload = decode_access_token(tok)
     if not payload:
         return None
-    return db.get(UserModel, payload.get("sub"))
-
-
-def get_or_provision_workspace_user(request: Request, response: Response, db: Session = Depends(get_db)) -> UserModel:
-    """
-    Returns authenticated UserModel if JWT cookie/header is valid.
-    Otherwise provisions an isolated guest tenant workspace with HttpOnly JWT cookies
-    so anonymous visitors still have strict user_id data isolation and zero 401 noise.
-    """
-    existing = get_optional_user(request, db)
-    if existing:
-        return existing
-
-    guest_email = f"guest-{uuid.uuid4().hex[:10]}@agam.local"
-    guest = create_user_account(db, email=guest_email, password=secrets.token_hex(16), is_guest=True)
-    issue_session_tokens(db, guest, request, response)
-    return guest
+    user = db.get(UserModel, payload.get("sub"))
+    if not user or user.is_guest or user.role == "community":
+        return None
+    return user
 
 
 def require_authenticated_user(user: Optional[UserModel] = Depends(get_optional_user)) -> UserModel:
     if not user:
-        raise HTTPException(status_code=401, detail="Authentication required")
+        raise HTTPException(status_code=401, detail="Authentication required. Sign in to access your local PC vault.")
     return user

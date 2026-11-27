@@ -31,9 +31,12 @@ from core.auth import (
     clear_session_cookies,
     create_user_account,
     decode_access_token,
+    delete_user_account,
     get_optional_user,
-    get_or_provision_workspace_user,
+    get_pc_owner_user,
+    get_pc_profiles,
     issue_session_tokens,
+    require_authenticated_user,
     rotate_refresh_token,
     verify_password,
 )
@@ -52,12 +55,18 @@ from core.quant_engine import (
 )
 from core.replay_engine import IsolatedReplayEngine
 from core.screener_engine import ScreenerQuery, run_columnar_scan
+from core.tax_brokerage import RATE_SYNC, calculate_order_charges, infer_country_and_sub
 from core.tenant_store import (
     TenantPortfolioService,
+    create_trade_idea,
     delete_user_alert,
+    get_activity_logs,
     get_user_layout,
     get_user_watchlists,
+    like_trade_idea,
+    list_trade_ideas,
     list_user_alerts,
+    log_activity,
     save_user_layout,
     upsert_user_watchlist,
 )
@@ -67,7 +76,12 @@ from core.ws_hub import RealtimeWebSocketHub
 from engine.google_finance import GoogleFinanceEngine
 from engine.google_news import GoogleNewsEngine
 
-app = FastAPI(title="Agam Institutional Multi-Tenant Paper Trading API", version="5.0.0")
+app = FastAPI(title="Agam Local PC Paper Trading Terminal API", version="6.0.0")
+
+_LOGIN_FAILURES: Dict[str, List[float]] = {}
+_LOGIN_LOCK = threading.Lock()
+_LOGIN_MAX_ATTEMPTS = 10
+_LOGIN_WINDOW_SEC = 60.0
 
 _extra_origins = [o.strip().rstrip("/") for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
 _frontend_url = os.environ.get("FRONTEND_URL", "").strip().rstrip("/")
@@ -85,6 +99,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_security_and_timing_headers(request: Request, call_next):
+    t0 = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.2f}"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
 
 # -------------------------------------------------------------
 # CORE ENGINE SINGLETONS (Zero yfinance — Google Finance & RSS)
@@ -233,6 +259,54 @@ def sync_batch_quotes(symbols: List[str]) -> None:
                     )
 
         LAST_MARKET_SYNC = datetime.now(timezone.utc).isoformat()
+        _maybe_save_market_cache()
+
+
+MARKET_CACHE_PATH = str(Path(__file__).resolve().parent / ".agam_market_cache.json")
+_LAST_CACHE_SAVE = 0.0
+_CACHE_SAVE_LOCK = threading.Lock()
+
+
+def _maybe_save_market_cache(force: bool = False) -> None:
+    global _LAST_CACHE_SAVE
+    now = time.time()
+    with _CACHE_SAVE_LOCK:
+        if not force and (now - _LAST_CACHE_SAVE) < 30.0:
+            return
+        _LAST_CACHE_SAVE = now
+    try:
+        UNIVERSE.export_cache_snapshot(MARKET_CACHE_PATH)
+    except Exception:
+        pass
+
+
+def _seed_prices_from_universe() -> None:
+    try:
+        rows = list(UNIVERSE._by_symbol.values())
+        seeded: Dict[str, dict] = {}
+        for r in rows:
+            px = float(r.get("price") or 0.0)
+            if px > 0:
+                seeded[r["symbol"]] = {
+                    "symbol": r["symbol"],
+                    "name": r.get("name") or r["symbol"],
+                    "price": px,
+                    "prev_close": float(r.get("prev_close") or px),
+                    "change": float(r.get("change") or 0.0),
+                    "change_percent": float(r.get("change_percent") or 0.0),
+                    "volume": int(r.get("volume") or 0),
+                    "currency": r.get("currency") or "USD",
+                    "exchange": r.get("exchange") or "NASDAQ",
+                    "rsi_14": float(r.get("rsi_14") or 50.0),
+                    "as_of": r.get("as_of") or "",
+                    "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+                }
+        if seeded:
+            with PRICE_LOCK:
+                for k, v in seeded.items():
+                    LIVE_PRICES.setdefault(k, v)
+    except Exception:
+        pass
 
 
 UNIVERSE_READY = threading.Event()
@@ -327,8 +401,11 @@ def _starter_record(sym: str) -> dict:
 
 def _startup_ingest_and_sync_loop():
     print("Ingesting live global security universe (IND, USA, CANADA, CHINA, EU) in background...")
+    # Immediately sync core watchlist + country index tickers in parallel with universe master ingestion
+    threading.Thread(target=lambda: sync_batch_quotes(PRIORITY_LIVE_SYMBOLS[:28]), daemon=True).start()
     try:
         UNIVERSE.ingest_all_regions_parallel()
+        _maybe_save_market_cache(force=True)
         gc.collect()
         print("Universe ingested:", UNIVERSE.stats)
     except Exception as exc:
@@ -336,16 +413,26 @@ def _startup_ingest_and_sync_loop():
     finally:
         UNIVERSE_READY.set()
 
+    last_universe_refresh = time.time()
     while True:
         try:
             sync_batch_quotes(PRIORITY_LIVE_SYMBOLS)
+            # Automatically refresh full global exchange masters & dynamic FX/commodities every 6 hours
+            if (time.time() - last_universe_refresh) >= 21600:
+                last_universe_refresh = time.time()
+                UNIVERSE.ingest_all_regions_parallel()
+                _maybe_save_market_cache(force=True)
         except Exception as exc:
             print("Quote sync loop warning:", exc)
         time.sleep(15)
 
 
-# Seed instant starter instruments (<1ms) so HTTP requests succeed immediately on boot
+# Seed instant starter instruments + local warm cache (<50ms) so UI opens instantaneously
 UNIVERSE._upsert_records([_starter_record(s) for s in PRIORITY_LIVE_SYMBOLS])
+_cached_count = UNIVERSE.load_cache_snapshot(MARKET_CACHE_PATH)
+if _cached_count > 0:
+    _seed_prices_from_universe()
+    print(f"Warm disk universe cache loaded: {_cached_count} instruments in <50ms")
 
 
 def _load_persisted_alerts_to_zset() -> None:
@@ -365,6 +452,7 @@ async def lifespan(_app: FastAPI):
     MAIN_EVENT_LOOP = asyncio.get_running_loop()
     init_db()
     _load_persisted_alerts_to_zset()
+    RATE_SYNC.refresh_async_if_stale()
     if not _BG_STARTED:
         _BG_STARTED = True
         threading.Thread(target=_startup_ingest_and_sync_loop, daemon=True).start()
@@ -1104,6 +1192,7 @@ def get_quote(symbol: str):
             with PRICE_LOCK:
                 LIVE_PRICES[symbol] = quote
             UNIVERSE.update_quotes({symbol: quote})
+            meta = UNIVERSE.get_by_symbol(symbol) or meta
 
     if not quote:
         raise HTTPException(status_code=404, detail=f"Live Google Finance / exchange quote unavailable for {symbol}")
@@ -1245,48 +1334,114 @@ class AlertCreateRequest(BaseModel):
 
 
 # -------------------------------------------------------------
-# MULTI-TENANT JWT AUTHENTICATION & USER PREFERENCES
+# LOCAL PC MULTI-PROFILE VAULT AUTHENTICATION & AUDIT LOGS
 # -------------------------------------------------------------
 class AuthCredentials(BaseModel):
     email: str
     password: str
-    base_currency: str = "USD"
+    display_name: str = ""
+    base_currency: str = "INR"
     theme_preference: str = "light"
+    accepted_disclaimer: bool = False
+
+
+class DeleteAccountRequest(BaseModel):
+    email: Optional[str] = None
+    password: str
 
 
 class PreferencesPatch(BaseModel):
+    display_name: Optional[str] = None
     base_currency: Optional[str] = None
     theme_preference: Optional[str] = None
+
+
+def _mask_email(email: str) -> str:
+    if "@" not in email:
+        return email
+    local, dom = email.split("@", 1)
+    if len(local) <= 2:
+        return f"{local[0]}***@{dom}"
+    return f"{local[:2]}***{local[-1]}@{dom}"
 
 
 def _user_payload(user: UserModel, access_token: Optional[str] = None) -> dict:
     data = {
         "id": user.id,
         "email": user.email,
+        "display_name": user.display_name or user.email.split("@")[0],
         "role": user.role,
         "base_currency": user.base_currency,
         "theme_preference": user.theme_preference,
-        "is_guest": user.is_guest,
+        "is_guest": bool(user.is_guest),
+        "accepted_disclaimer": bool(user.accepted_risk_at is not None),
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+        "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
     }
     if access_token:
         data["access_token"] = access_token
     return data
 
 
+@app.get("/api/auth/status")
+def auth_status(request: Request, db: Session = Depends(get_db)):
+    profiles = get_pc_profiles(db)
+    current = get_optional_user(request, db)
+    return {
+        "initialized": len(profiles) > 0,
+        "single_user_mode": False,
+        "multi_profile_mode": True,
+        "profile_count": len(profiles),
+        "profiles": [
+            {
+                "id": p.id,
+                "display_name": p.display_name or p.email.split("@")[0],
+                "email": p.email,
+                "email_hint": _mask_email(p.email),
+                "base_currency": p.base_currency,
+                "role": p.role,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+                "last_login_at": p.last_login_at.isoformat() if p.last_login_at else None,
+            }
+            for p in profiles
+        ],
+        "owner_name": (profiles[0].display_name or profiles[0].email.split("@")[0]) if profiles else None,
+        "owner_email_hint": _mask_email(profiles[0].email) if profiles else None,
+        "authenticated": current is not None,
+        "user": _user_payload(current) if current else None,
+    }
+
+
 @app.post("/api/auth/register")
 def register_user(req: AuthCredentials, request: Request, response: Response, db: Session = Depends(get_db)):
     email = req.email.strip().lower()
     if "@" not in email or len(req.password) < 6:
-        raise HTTPException(status_code=400, detail="Valid email and password (min 6 chars) required.")
+        raise HTTPException(status_code=400, detail="Valid email and password (minimum 6 characters) are required.")
+    if not req.accepted_disclaimer:
+        raise HTTPException(
+            status_code=400,
+            detail="You must read and acknowledge the Risk & Regulatory Disclaimers before creating your local account.",
+        )
     if db.scalar(select(UserModel).where(UserModel.email == email)):
-        raise HTTPException(status_code=409, detail="Email is already registered.")
+        raise HTTPException(status_code=409, detail="An account with this email already exists on this PC.")
+
+    existing_profiles = get_pc_profiles(db)
     user = create_user_account(
         db,
         email=email,
         password=req.password,
-        base_currency=req.base_currency,
-        theme_preference=req.theme_preference,
-        is_guest=False,
+        display_name=req.display_name.strip() or email.split("@")[0],
+        base_currency=req.base_currency or "INR",
+        theme_preference=req.theme_preference or "light",
+        accepted_risk=True,
+        role="owner" if len(existing_profiles) == 0 else "trader",
+    )
+    log_activity(
+        db,
+        user.id,
+        "AUTH",
+        "SIGNUP",
+        details=f"Registered local PC trader profile ({user.base_currency} base, fixed capital rules & disclaimer accepted)",
     )
     tokens = issue_session_tokens(db, user, request, response)
     return _user_payload(user, tokens["access_token"])
@@ -1295,11 +1450,53 @@ def register_user(req: AuthCredentials, request: Request, response: Response, db
 @app.post("/api/auth/login")
 def login_user(req: AuthCredentials, request: Request, response: Response, db: Session = Depends(get_db)):
     email = req.email.strip().lower()
+    client_ip = request.client.host if request.client else "local"
+    rate_key = f"{client_ip}:{email}"
+    now = time.time()
+    with _LOGIN_LOCK:
+        attempts = [ts for ts in _LOGIN_FAILURES.get(rate_key, []) if (now - ts) < _LOGIN_WINDOW_SEC]
+        _LOGIN_FAILURES[rate_key] = attempts
+        if len(attempts) >= _LOGIN_MAX_ATTEMPTS:
+            raise HTTPException(status_code=429, detail="Too many failed login attempts. Wait 60 seconds and try again.")
+
     user = db.scalar(select(UserModel).where(UserModel.email == email))
-    if not user or not verify_password(req.password, user.hashed_password):
+    if not user or user.is_guest or user.role == "community" or not verify_password(req.password, user.hashed_password):
+        with _LOGIN_LOCK:
+            _LOGIN_FAILURES.setdefault(rate_key, []).append(now)
         raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    with _LOGIN_LOCK:
+        _LOGIN_FAILURES.pop(rate_key, None)
+
+    user.last_login_at = datetime.now(timezone.utc)
+    db.commit()
+    log_activity(db, user.id, "AUTH", "LOGIN", details="Signed into local PC trader profile")
     tokens = issue_session_tokens(db, user, request, response)
     return _user_payload(user, tokens["access_token"])
+
+
+@app.post("/api/auth/delete-account")
+def remove_user_profile(req: DeleteAccountRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    current = get_optional_user(request, db)
+    target_email = (req.email or (current.email if current else "")).strip().lower()
+    if not target_email:
+        raise HTTPException(status_code=400, detail="Account email is required to remove a profile.")
+    target = db.scalar(select(UserModel).where(UserModel.email == target_email))
+    if not target or target.is_guest or target.role == "community":
+        raise HTTPException(status_code=404, detail="Trader profile not found.")
+    if not verify_password(req.password, target.hashed_password):
+        raise HTTPException(status_code=401, detail="Incorrect password. Profile removal cancelled.")
+
+    was_current = current is not None and current.id == target.id
+    if was_current:
+        clear_session_cookies(request, response, db=db)
+    delete_user_account(db, target)
+    return {
+        "status": "DELETED",
+        "email": target_email,
+        "was_current": was_current,
+        "message": f"Removed profile {target_email} and its local vault records.",
+    }
 
 
 @app.post("/api/auth/refresh")
@@ -1316,41 +1513,49 @@ def refresh_session(request: Request, response: Response, db: Session = Depends(
 
 @app.post("/api/auth/logout")
 def logout_user(request: Request, response: Response, db: Session = Depends(get_db)):
-    clear_session_cookies(request, response)
-    guest = create_user_account(
-        db,
-        email=f"guest-{uuid.uuid4().hex[:10]}@agam.local",
-        password=uuid.uuid4().hex,
-        is_guest=True,
-    )
-    tokens = issue_session_tokens(db, guest, request, response)
-    return {"status": "LOGGED_OUT", "user": _user_payload(guest, tokens["access_token"])}
+    current = get_optional_user(request, db)
+    if current:
+        log_activity(db, current.id, "AUTH", "LOGOUT", details="Signed out of local PC session")
+    clear_session_cookies(request, response, db=db)
+    return {"status": "LOGGED_OUT", "user": None}
 
 
 @app.get("/api/auth/me")
 def get_me(
-    request: Request,
-    response: Response,
-    db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
-    existing = get_optional_user(request, db)
-    tok = None if existing else issue_session_tokens(db, current_user, request, response)["access_token"]
-    return _user_payload(current_user, tok)
+    return _user_payload(current_user)
 
 
 @app.patch("/api/auth/preferences")
 def update_preferences(
     patch: PreferencesPatch,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
+    changes: List[str] = []
+    if patch.display_name is not None and patch.display_name.strip():
+        current_user.display_name = patch.display_name.strip()[:80]
+        changes.append(f"name={current_user.display_name}")
     if patch.base_currency:
         current_user.base_currency = patch.base_currency
+        changes.append(f"currency={patch.base_currency}")
     if patch.theme_preference in ("light", "dark"):
         current_user.theme_preference = patch.theme_preference
+        changes.append(f"theme={patch.theme_preference}")
     db.commit()
+    if changes:
+        log_activity(db, current_user.id, "SETTINGS", "UPDATE_PREFERENCES", details=", ".join(changes))
     return _user_payload(current_user)
+
+
+@app.get("/api/activity")
+def list_activity(
+    limit: int = 120,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(require_authenticated_user),
+):
+    return {"logs": get_activity_logs(db, current_user.id, limit=limit)}
 
 
 # -------------------------------------------------------------
@@ -1359,7 +1564,7 @@ def update_preferences(
 @app.get("/api/alerts")
 def get_alerts(
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
     return list_user_alerts(db, current_user.id, ALERTS.backend_mode, ALERTS.triggered_log)
 
@@ -1368,7 +1573,7 @@ def get_alerts(
 def create_alert(
     req: AlertCreateRequest,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
     rule_id = f"alr-{uuid.uuid4().hex[:10]}"
     row = UserAlertModel(
@@ -1384,6 +1589,7 @@ def create_alert(
     db.commit()
     ALERT_USER_MAP[rule_id] = current_user.id
     rule = ALERTS.add_rule(row.symbol, req.condition, req.threshold, req.note, rule_id=rule_id)
+    log_activity(db, current_user.id, "ALERT", "CREATE_ALERT", symbol=row.symbol, details=f"{req.condition} @ {req.threshold}")
     return {"status": "CREATED", "rule": rule}
 
 
@@ -1391,17 +1597,18 @@ def create_alert(
 def delete_alert(
     rule_id: str,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
     if not delete_user_alert(db, current_user.id, rule_id):
         raise HTTPException(status_code=404, detail="Alert rule not found")
     ALERT_USER_MAP.pop(rule_id, None)
     ALERTS.delete_rule(rule_id)
+    log_activity(db, current_user.id, "ALERT", "DELETE_ALERT", details=f"Removed rule {rule_id}")
     return {"status": "DELETED", "rule_id": rule_id}
 
 
 # -------------------------------------------------------------
-# CLOUD-SYNCED CHART LAYOUTS, DRAWINGS & WATCHLISTS
+# PERSISTENT LOCAL CHART LAYOUTS, DRAWINGS & WATCHLISTS
 # -------------------------------------------------------------
 class LayoutSaveRequest(BaseModel):
     layout_name: str = "default"
@@ -1420,7 +1627,7 @@ class WatchlistSaveRequest(BaseModel):
 def fetch_layout(
     layout_name: str = "default",
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
     return get_user_layout(db, current_user.id, layout_name)
 
@@ -1429,9 +1636,9 @@ def fetch_layout(
 def store_layout(
     req: LayoutSaveRequest,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
-    return save_user_layout(
+    res = save_user_layout(
         db,
         current_user.id,
         req.layout_name,
@@ -1440,12 +1647,21 @@ def store_layout(
         req.drawings,
         req.active_indicators,
     )
+    log_activity(
+        db,
+        current_user.id,
+        "CHART",
+        "SAVE_LAYOUT",
+        symbol=req.symbol,
+        details=f"Grid={req.grid_type}, Drawings={len(req.drawings)}, Indicators={len(req.active_indicators)}",
+    )
+    return res
 
 
 @app.get("/api/user/watchlists")
 def fetch_watchlists(
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
     return get_user_watchlists(db, current_user.id)
 
@@ -1454,9 +1670,11 @@ def fetch_watchlists(
 def store_watchlist(
     req: WatchlistSaveRequest,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
-    return upsert_user_watchlist(db, current_user.id, req.name, req.symbols)
+    res = upsert_user_watchlist(db, current_user.id, req.name, req.symbols)
+    log_activity(db, current_user.id, "WATCHLIST", "UPDATE_WATCHLIST", details=f"{req.name}: {len(req.symbols)} symbols")
+    return res
 
 
 # -------------------------------------------------------------
@@ -1465,16 +1683,26 @@ def store_watchlist(
 @app.get("/api/export/trades.csv")
 def export_trades_csv(
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
     orders = db.scalars(
         select(OrderModel).where(OrderModel.user_id == current_user.id).order_by(OrderModel.created_at.desc())
     ).all()
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["OrderID", "Symbol", "Side", "Mode", "Status", "Qty", "Price", "Currency", "Charges", "Timestamp"])
+    writer.writerow([
+        "OrderID", "Country", "Exchange", "Symbol", "Side", "Mode", "ProductType", "Status",
+        "Qty", "Price", "Currency", "GrossAmount", "Brokerage", "STT_FTT", "StampDuty",
+        "ExchangeFee", "RegulatorFee", "GST_VAT", "DP_Clearing", "TotalCharges",
+        "GrossPnL", "NetPnL", "Timestamp",
+    ])
     for o in orders:
-        writer.writerow([o.id, o.symbol, o.side, o.order_mode, o.status, o.qty, o.price or o.limit_price, o.currency, o.charges, o.created_at.isoformat()])
+        writer.writerow([
+            o.id, o.country, o.exchange, o.symbol, o.side, o.order_mode, o.product_type, o.status,
+            o.qty, o.price or o.limit_price, o.currency, o.gross_amount, o.brokerage, o.stt_or_ftt,
+            o.stamp_duty, o.exchange_fee, o.regulator_fee, o.gst_vat, o.dp_or_clearing_fee,
+            o.charges, o.realized_pnl, o.net_pnl, o.created_at.isoformat(),
+        ])
     buf.seek(0)
     return StreamingResponse(
         iter([buf.getvalue()]),
@@ -1572,45 +1800,155 @@ def get_expiries(symbol: str):
 @app.get("/api/portfolio")
 def get_portfolio(
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
     return TenantPortfolioService.get_snapshot(db, current_user.id, LIVE_PRICES)
+
+
+class ChargePreviewRequest(BaseModel):
+    symbol: str
+    quantity: int = 1
+    price: Optional[float] = None
+    order_type: str = "BUY"
+    product_type: str = "DELIVERY"
+    broker_plan: str = "DISCOUNT"
+    country: Optional[str] = None
+    exchange: Optional[str] = None
+    currency: Optional[str] = None
+    category: Optional[str] = None
 
 
 class OrderRequest(BaseModel):
     symbol: str
     quantity: int
     order_type: str
-    order_mode: str
+    order_mode: str = "MARKET"
+    product_type: str = "DELIVERY"
+    broker_plan: str = "DISCOUNT"
     price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
+    trailing_sl: Optional[float] = None
+    notes: str = ""
+
+
+class ModifyOrderRequest(BaseModel):
+    limit_price: Optional[float] = None
+    quantity: Optional[int] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+
+class UpdateRiskRequest(BaseModel):
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    trailing_sl: Optional[float] = None
+
+
+class SquareOffAllRequest(BaseModel):
+    country: Optional[str] = None
+
+
+class ResetPortfolioRequest(BaseModel):
+    country: Optional[str] = None
+
+
+class TradeIdeaCreateRequest(BaseModel):
+    symbol: str
+    name: Optional[str] = None
+    country: Optional[str] = None
+    currency: Optional[str] = None
+    direction: str = "BULLISH"
+    product_type: str = "INTRADAY"
+    entry_price: Optional[float] = None
+    target_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    timeframe: str = "1D"
+    thesis: str
+
+
+def _resolve_symbol_context(symbol: str, quote: Optional[dict] = None, meta: Optional[dict] = None) -> dict:
+    inferred_country, _, inferred_exch = infer_country_and_sub(
+        symbol,
+        region=(meta or {}).get("region"),
+        exchange=(meta or {}).get("exchange") or (quote or {}).get("exchange"),
+        currency=(meta or {}).get("currency") or (quote or {}).get("currency"),
+    )
+    default_curr = REGION_DEFAULT_CURRENCY.get(inferred_country, "USD")
+    curr = (meta or {}).get("currency") or (quote or {}).get("currency") or default_curr
+    if symbol.upper().endswith(".L") and curr not in ("USD", "GBP", "GBp"):
+        curr = "GBp"
+    exch = (meta or {}).get("exchange") or (quote or {}).get("exchange") or inferred_exch
+    cat = (meta or {}).get("category") or "stocks"
+    name = (meta or {}).get("name")
+    if not name or name == symbol:
+        name = (quote or {}).get("name") or symbol
+    return {
+        "country": inferred_country,
+        "currency": curr,
+        "exchange": exch,
+        "category": cat,
+        "name": name,
+    }
+
+
+@app.get("/api/charges/schedules")
+def get_tax_and_brokerage_schedules():
+    return RATE_SYNC.get_all_schedules()
+
+
+@app.post("/api/charges/preview")
+def preview_order_charges(req: ChargePreviewRequest):
+    meta = UNIVERSE.get_by_symbol(req.symbol)
+    with PRICE_LOCK:
+        quote = LIVE_PRICES.get(req.symbol)
+    px = float(req.price or 0.0)
+    if px <= 0 and quote and quote.get("price", 0) > 0:
+        px = float(quote["price"])
+    if px <= 0 and meta and float(meta.get("price") or 0) > 0:
+        px = float(meta["price"])
+    ctx = _resolve_symbol_context(req.symbol, quote=quote, meta=meta)
+    bd = calculate_order_charges(
+        symbol=req.symbol,
+        quantity=max(1, req.quantity),
+        price=px,
+        side=req.order_type,
+        product_type=req.product_type,
+        broker_plan=req.broker_plan,
+        region=req.country or ctx["country"],
+        exchange=req.exchange or ctx["exchange"],
+        currency=req.currency or ctx["currency"],
+        category=req.category or ctx["category"],
+    )
+    return bd.to_dict()
 
 
 @app.post("/api/orders/place")
 def place_order(
     order: OrderRequest,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
     meta = UNIVERSE.get_by_symbol(order.symbol)
-    curr = meta["currency"] if meta else "USD"
-    name = meta["name"] if meta else order.symbol
-
     with PRICE_LOCK:
         quote = LIVE_PRICES.get(order.symbol)
     if not quote or quote.get("price", 0) <= 0:
         quote = GF_ENGINE.fetch_quote_with_fallback(order.symbol, exchange_hint=meta.get("exchange") if meta else None)
-    if not quote:
+        if quote:
+            with PRICE_LOCK:
+                LIVE_PRICES[order.symbol] = quote
+    if not quote or float(quote.get("price") or 0) <= 0:
         raise HTTPException(status_code=404, detail=f"Live quote unavailable for {order.symbol}")
+
+    ctx = _resolve_symbol_context(order.symbol, quote=quote, meta=meta)
 
     try:
         res = TenantPortfolioService.place_order(
             db=db,
             user_id=current_user.id,
             symbol=order.symbol,
-            name=name,
-            currency=curr,
+            name=ctx["name"],
+            currency=ctx["currency"],
             quantity=order.quantity,
             order_type=order.order_type,
             order_mode=order.order_mode,
@@ -1618,7 +1956,48 @@ def place_order(
             limit_price=order.price,
             stop_loss=order.stop_loss,
             take_profit=order.take_profit,
+            trailing_sl=order.trailing_sl,
+            product_type=order.product_type,
+            broker_plan=order.broker_plan,
+            country=ctx["country"],
+            exchange=ctx["exchange"],
+            category=ctx["category"],
+            notes=order.notes,
         )
+        log_activity(
+            db,
+            current_user.id,
+            "TRADE",
+            f"ORDER_{res.get('status', 'PLACED')}",
+            symbol=order.symbol.upper(),
+            details=res.get("message", f"{order.order_type} {order.quantity} {order.product_type}"),
+        )
+        WS_HUB.schedule_user_event(MAIN_EVENT_LOOP, current_user.id, {"type": "PORTFOLIO_UPDATE", **res})
+        return res
+    except ValueError as e:
+        log_activity(
+            db,
+            current_user.id,
+            "TRADE",
+            "ORDER_REJECTED",
+            symbol=order.symbol.upper(),
+            details=str(e),
+        )
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.patch("/api/orders/{order_id}")
+def modify_pending_order_endpoint(
+    order_id: str,
+    req: ModifyOrderRequest,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(require_authenticated_user),
+):
+    try:
+        res = TenantPortfolioService.modify_pending_order(
+            db, current_user.id, order_id, req.limit_price, req.quantity, req.stop_loss, req.take_profit
+        )
+        log_activity(db, current_user.id, "TRADE", "MODIFY_ORDER", details=f"Order {order_id} updated")
         WS_HUB.schedule_user_event(MAIN_EVENT_LOOP, current_user.id, {"type": "PORTFOLIO_UPDATE", **res})
         return res
     except ValueError as e:
@@ -1629,21 +2008,119 @@ def place_order(
 def cancel_pending_order(
     order_id: str,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
     if not TenantPortfolioService.cancel_pending_order(db, current_user.id, order_id):
         raise HTTPException(status_code=404, detail="Pending order not found")
+    log_activity(db, current_user.id, "TRADE", "CANCEL_ORDER", details=f"Cancelled pending order {order_id}")
+    WS_HUB.schedule_user_event(MAIN_EVENT_LOOP, current_user.id, {"type": "PORTFOLIO_UPDATE"})
     return {"status": "CANCELLED", "order_id": order_id}
+
+
+@app.patch("/api/positions/{position_id}/risk")
+def update_position_risk_endpoint(
+    position_id: str,
+    req: UpdateRiskRequest,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(require_authenticated_user),
+):
+    try:
+        res = TenantPortfolioService.update_position_risk(
+            db, current_user.id, position_id, req.stop_loss, req.take_profit, req.trailing_sl
+        )
+        log_activity(
+            db,
+            current_user.id,
+            "RISK",
+            "UPDATE_POSITION_SL_TP",
+            details=f"Pos={position_id} SL={req.stop_loss} TP={req.take_profit} TSL={req.trailing_sl}",
+        )
+        WS_HUB.schedule_user_event(MAIN_EVENT_LOOP, current_user.id, {"type": "PORTFOLIO_UPDATE", **res})
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/positions/square-off-all")
+def square_off_all_endpoint(
+    req: Optional[SquareOffAllRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(require_authenticated_user),
+):
+    res = TenantPortfolioService.square_off_all(db, current_user.id, LIVE_PRICES, country=req.country if req else None)
+    log_activity(
+        db,
+        current_user.id,
+        "TRADE",
+        "SQUARE_OFF_ALL",
+        details=f"Country={(req.country if req else None) or 'ALL'} closed={res.get('closed_count', 0)}",
+    )
+    WS_HUB.schedule_user_event(MAIN_EVENT_LOOP, current_user.id, {"type": "PORTFOLIO_UPDATE", **res})
+    return res
 
 
 @app.post("/api/portfolio/reset")
 def reset_portfolio(
+    req: Optional[ResetPortfolioRequest] = None,
+    country: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_or_provision_workspace_user),
+    current_user: UserModel = Depends(require_authenticated_user),
 ):
-    TenantPortfolioService.reset_user_portfolio(db, current_user.id)
-    WS_HUB.schedule_user_event(MAIN_EVENT_LOOP, current_user.id, {"type": "PORTFOLIO_RESET"})
-    return {"status": "SUCCESS", "message": "Virtual multi-currency wallets & positions reset!"}
+    log_activity(db, current_user.id, "RISK", "BLOCKED_RESET_ATTEMPT", details="Fixed capital reset attempt blocked")
+    raise HTTPException(
+        status_code=403,
+        detail="Wallet reset is permanently disabled. Fixed starting capital discipline is enforced on this PC.",
+    )
+
+
+@app.get("/api/feed/ideas")
+def get_feed_ideas(
+    country: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    return {"ideas": list_trade_ideas(db, LIVE_PRICES, country=country)}
+
+
+@app.post("/api/feed/ideas")
+def post_feed_idea(
+    req: TradeIdeaCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(require_authenticated_user),
+):
+    if not req.thesis.strip():
+        raise HTTPException(status_code=400, detail="Trade thesis cannot be empty.")
+    meta = UNIVERSE.get_by_symbol(req.symbol)
+    with PRICE_LOCK:
+        quote = LIVE_PRICES.get(req.symbol)
+    ctx = _resolve_symbol_context(req.symbol, quote=quote, meta=meta)
+    px = float(req.entry_price or 0.0)
+    if px <= 0 and quote and quote.get("price", 0) > 0:
+        px = float(quote["price"])
+    idea = create_trade_idea(
+        db=db,
+        user=current_user,
+        symbol=req.symbol.upper().strip(),
+        name=req.name or ctx["name"],
+        country=req.country or ctx["country"],
+        currency=req.currency or ctx["currency"],
+        direction=req.direction,
+        product_type=req.product_type,
+        entry_price=px,
+        target_price=req.target_price,
+        stop_loss=req.stop_loss,
+        timeframe=req.timeframe,
+        thesis=req.thesis,
+    )
+    log_activity(db, current_user.id, "IDEA", "PUBLISH_IDEA", symbol=req.symbol.upper(), details=f"{req.direction} thesis logged")
+    return {"status": "PUBLISHED", "idea": idea}
+
+
+@app.post("/api/feed/ideas/{idea_id}/like")
+def like_feed_idea(idea_id: str, db: Session = Depends(get_db)):
+    res = like_trade_idea(db, idea_id)
+    if not res:
+        raise HTTPException(status_code=404, detail="Idea not found")
+    return res
 
 
 # -------------------------------------------------------------
@@ -1658,7 +2135,7 @@ async def websocket_market_symbol(websocket: WebSocket, symbol: str):
                 quote = LIVE_PRICES.get(symbol)
             if quote:
                 await websocket.send_json({"type": "TICK", **quote})
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(0.5)
     except (WebSocketDisconnect, Exception):
         WS_HUB.disconnect_market(symbol, websocket)
 
@@ -1667,7 +2144,7 @@ async def websocket_market_symbol(websocket: WebSocket, symbol: str):
 async def websocket_user_stream(websocket: WebSocket, user_id: str):
     token = websocket.cookies.get("agam_access") or websocket.query_params.get("token")
     payload = decode_access_token(token) if token else None
-    if payload and payload.get("sub") != user_id:
+    if not payload or payload.get("sub") != user_id:
         await websocket.close(code=1008)
         return
     await WS_HUB.connect_user(user_id, websocket)
@@ -1684,6 +2161,8 @@ async def websocket_live_feed(websocket: WebSocket):
     await websocket.accept()
     primary_symbol = "RELIANCE.NS"
     last_news_poll = 0.0
+    last_sent_sig = ""
+    last_sent_ts = 0.0
     try:
         while True:
             try:
@@ -1692,6 +2171,7 @@ async def websocket_live_feed(websocket: WebSocket):
                     data = json.loads(msg)
                     if "symbol" in data and data["symbol"]:
                         primary_symbol = data["symbol"]
+                        last_sent_sig = ""
             except asyncio.TimeoutError:
                 pass
 
@@ -1702,19 +2182,23 @@ async def websocket_live_feed(websocket: WebSocket):
                     for k, v in LIVE_PRICES.items()
                 }
 
-            if quote:
-                await websocket.send_json({
-                    "type": "TICK",
-                    "symbol": primary_symbol,
-                    "price": quote["price"],
-                    "change": quote["change"],
-                    "change_percent": quote["change_percent"],
-                    "as_of": quote.get("as_of", ""),
-                    "timestamp": quote["timestamp"],
-                    "all_prices": all_prices,
-                })
-
             now = time.time()
+            if quote:
+                sig = f"{primary_symbol}:{quote.get('price')}:{quote.get('timestamp')}:{len(all_prices)}"
+                if sig != last_sent_sig or (now - last_sent_ts) >= 5.0:
+                    last_sent_sig = sig
+                    last_sent_ts = now
+                    await websocket.send_json({
+                        "type": "TICK",
+                        "symbol": primary_symbol,
+                        "price": quote["price"],
+                        "change": quote["change"],
+                        "change_percent": quote["change_percent"],
+                        "as_of": quote.get("as_of", ""),
+                        "timestamp": quote["timestamp"],
+                        "all_prices": all_prices,
+                    })
+
             if (now - last_news_poll) >= 30.0:
                 last_news_poll = now
                 meta = UNIVERSE.get_by_symbol(primary_symbol)
@@ -1730,7 +2214,7 @@ async def websocket_live_feed(websocket: WebSocket):
                         "article": art,
                     })
 
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(0.5)
     except (WebSocketDisconnect, Exception):
         pass
 

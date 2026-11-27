@@ -4,7 +4,10 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import TradingViewChart, { ChartStyle, TimeframeKey } from "@/components/TradingViewChart";
 import RightSidebar, { RightPanelTab, WatchlistAsset } from "@/components/tv/RightSidebar";
 import BottomTerminalDrawer, { BottomDrawerTab } from "@/components/tv/BottomTerminalDrawer";
-import { Position, PendingOrder, OrderHistoryItem } from "@/components/PositionsTable";
+import FrontPagePortfolio from "@/components/frontpage/FrontPagePortfolio";
+import FrontPageOrders from "@/components/frontpage/FrontPageOrders";
+import FrontPageTaxCenter from "@/components/frontpage/FrontPageTaxCenter";
+import FrontPageFeed from "@/components/frontpage/FrontPageFeed";
 import IpoCardList, { IpoItem } from "@/components/IpoCardList";
 import MacroInflation, { MacroData } from "@/components/MacroInflation";
 import MultiChartWorkspace from "@/components/MultiChartWorkspace";
@@ -12,13 +15,21 @@ import FinancialsOverview from "@/components/fundamentals/FinancialsOverview";
 import { NewsArticle } from "@/components/CompanyNewsStream";
 import {
   Activity,
+  AlertTriangle,
   Bell,
+  Briefcase,
   Building2,
   Calendar,
   ChevronDown,
+  ClipboardList,
+  Database,
   Download,
+  Flame,
   FunctionSquare,
   Grid,
+  Landmark,
+  ListOrdered,
+  Lock,
   Maximize2,
   Menu,
   Moon,
@@ -26,8 +37,8 @@ import {
   Printer,
   RefreshCw,
   Rocket,
-  RotateCcw,
   Search,
+  ShieldAlert,
   Sun,
   User,
   Wallet,
@@ -38,6 +49,22 @@ import { API_BASE_URL, apiUrl, authFetch, getStoredToken, wsUrl } from "@/lib/ap
 import { useTheme } from "@/components/ThemeProvider";
 import { useAuth } from "@/components/AuthProvider";
 import AuthModal from "@/components/AuthModal";
+import AuthGate from "@/components/AuthGate";
+import CountryFlag from "@/components/CountryFlag";
+import RiskDisclaimerModal from "@/components/RiskDisclaimerModal";
+import ActivityLogPanel from "@/components/ActivityLogPanel";
+import {
+  CapitalHealthEntry,
+  ClosedTradeItem,
+  COUNTRY_META,
+  CountryAnalytics,
+  CountryTaxSummary,
+  OrderDraftPreset,
+  OrderHistoryItem,
+  PendingOrder,
+  Position,
+  WalletDetail,
+} from "@/types/trading";
 
 interface SearchResult {
   symbol: string;
@@ -54,7 +81,7 @@ interface SessionInfo {
   status: string;
 }
 
-type ActiveView = "chart" | "overview" | "multichart" | "screener" | "replay" | "ipos" | "macro";
+type ActiveView = "chart" | "portfolio" | "orders" | "taxes" | "feed" | "overview" | "multichart" | "screener" | "replay" | "ipos" | "macro";
 
 const QUICK_TIMEFRAMES: TimeframeKey[] = ["1m", "5m", "15m", "1h", "1D", "1W", "1M"];
 const TICK_TIMEFRAMES: TimeframeKey[] = ["1s", "5s", "10T"];
@@ -70,8 +97,10 @@ const REGION_CURRENCY_MAP: Record<string, string> = {
 
 export default function Home() {
   const { theme, toggleTheme } = useTheme();
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const [authOpen, setAuthOpen] = useState<boolean>(false);
+  const [disclaimerOpen, setDisclaimerOpen] = useState<boolean>(false);
+  const [activityOpen, setActivityOpen] = useState<boolean>(false);
 
   const [selectedCountry, setSelectedCountry] = useState<string>("IND");
   const [selectedCategory, setSelectedCategory] = useState<string>("stocks");
@@ -108,7 +137,6 @@ export default function Home() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState<boolean>(false);
 
-  const [resetConfirm, setResetConfirm] = useState<boolean>(false);
   const [sessions, setSessions] = useState<Record<string, SessionInfo>>({});
   const [universeTotal, setUniverseTotal] = useState<number>(0);
   const [wallets, setWallets] = useState<Record<string, number>>({
@@ -120,9 +148,17 @@ export default function Home() {
     GBP: 100000.0,
     GBp: 10000000.0,
   });
+  const [walletDetails, setWalletDetails] = useState<Record<string, WalletDetail>>({});
+  const [capitalHealth, setCapitalHealth] = useState<Record<string, CapitalHealthEntry>>({});
   const [positions, setPositions] = useState<Position[]>([]);
   const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
   const [ordersHistory, setOrdersHistory] = useState<OrderHistoryItem[]>([]);
+  const [rejectedOrders, setRejectedOrders] = useState<OrderHistoryItem[]>([]);
+  const [closedTrades, setClosedTrades] = useState<ClosedTradeItem[]>([]);
+  const [taxSummaryByCountry, setTaxSummaryByCountry] = useState<Record<string, CountryTaxSummary>>({});
+  const [analyticsByCountry, setAnalyticsByCountry] = useState<Record<string, CountryAnalytics>>({});
+  const [indexQuotes, setIndexQuotes] = useState<Record<string, { price: number; change_percent: number }>>({});
+  const [orderPreset, setOrderPreset] = useState<OrderDraftPreset | null>(null);
   const [ipos, setIpos] = useState<IpoItem[]>([]);
   const [iposLoading, setIposLoading] = useState<boolean>(true);
   const [iposError, setIposError] = useState<string | null>(null);
@@ -133,6 +169,7 @@ export default function Home() {
   const [latestNewsAlert, setLatestNewsAlert] = useState<NewsArticle | null>(null);
   const [ipoNotice, setIpoNotice] = useState<string | null>(null);
   const [toastMsg, setToastMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const selectedSymbolRef = useRef<string | null>(null);
@@ -184,8 +221,9 @@ export default function Home() {
   }, [searchOpen, authOpen]);
 
   const showToast = useCallback((ok: boolean, text: string) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setToastMsg({ ok, text });
-    setTimeout(() => setToastMsg(null), 3500);
+    toastTimerRef.current = setTimeout(() => setToastMsg(null), 3500);
   }, []);
 
   const handleSelectCountry = (region: string) => {
@@ -244,9 +282,15 @@ export default function Home() {
       if (res.ok) {
         const data = await res.json();
         setWallets(data.wallets);
+        setWalletDetails(data.wallet_details || {});
+        setCapitalHealth(data.capital_health || {});
         setPositions(data.positions || []);
         setPendingOrders(data.pending_orders || []);
         setOrdersHistory(data.orders_history || []);
+        setRejectedOrders(data.rejected_orders || []);
+        setClosedTrades(data.closed_trades || []);
+        setTaxSummaryByCountry(data.tax_summary_by_country || {});
+        setAnalyticsByCountry(data.analytics_by_country || {});
       }
     } catch {
       // ignore
@@ -298,6 +342,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (!user?.id) return;
     const controller = new AbortController();
     const timer = setTimeout(() => {
       loadAssetsForFilter(selectedCountry, selectedCategory, true, controller.signal);
@@ -307,19 +352,19 @@ export default function Home() {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [selectedCountry, selectedCategory, loadAssetsForFilter, fetchIpos]);
+  }, [user?.id, selectedCountry, selectedCategory, loadAssetsForFilter, fetchIpos]);
 
   useEffect(() => {
+    if (!user?.id) return;
     const timer = setTimeout(() => {
-      fetchPortfolio();
       fetchMacro();
       fetchHealthAndSessions();
     }, 0);
     return () => clearTimeout(timer);
-  }, [fetchPortfolio, fetchMacro, fetchHealthAndSessions]);
+  }, [user?.id, fetchMacro, fetchHealthAndSessions]);
 
   useEffect(() => {
-    if (!backendOffline) return;
+    if (!user?.id || !backendOffline) return;
     const timer = setInterval(() => {
       loadAssetsForFilter(selectedCountry, selectedCategory, true);
       fetchPortfolio();
@@ -328,18 +373,19 @@ export default function Home() {
       fetchIpos(selectedCountry);
     }, 2500);
     return () => clearInterval(timer);
-  }, [backendOffline, selectedCountry, selectedCategory, loadAssetsForFilter, fetchPortfolio, fetchMacro, fetchHealthAndSessions, fetchIpos]);
+  }, [user?.id, backendOffline, selectedCountry, selectedCategory, loadAssetsForFilter, fetchPortfolio, fetchMacro, fetchHealthAndSessions, fetchIpos]);
 
   useEffect(() => {
-    if (backendOffline || universeTotal >= 1000) return;
+    if (!user?.id || backendOffline || universeTotal >= 1000) return;
     const timer = setInterval(() => {
       fetchHealthAndSessions();
       loadAssetsForFilter(selectedCountry, selectedCategory, false);
     }, 4000);
     return () => clearInterval(timer);
-  }, [backendOffline, universeTotal, selectedCountry, selectedCategory, fetchHealthAndSessions, loadAssetsForFilter]);
+  }, [user?.id, backendOffline, universeTotal, selectedCountry, selectedCategory, fetchHealthAndSessions, loadAssetsForFilter]);
 
   useEffect(() => {
+    if (!user?.id) return;
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let isUnmounted = false;
@@ -380,6 +426,7 @@ export default function Home() {
                 );
               }
               if (data.all_prices) {
+                setIndexQuotes(data.all_prices);
                 setAssets((prev) =>
                   prev.map((a) => {
                     const updated = data.all_prices[a.symbol];
@@ -416,7 +463,7 @@ export default function Home() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (ws) ws.close();
     };
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     if (!user?.id) return;
@@ -447,11 +494,26 @@ export default function Home() {
 
   useEffect(() => {
     if (!user?.id) return;
+    const currToReg: Record<string, string> = {
+      INR: "IND",
+      USD: "USA",
+      CAD: "CANADA",
+      CNY: "CHINA",
+      EUR: "EU",
+      GBP: "EU",
+    };
     const t = setTimeout(() => {
+      if (user.base_currency) {
+        setActiveCurrency(user.base_currency);
+        if (currToReg[user.base_currency]) {
+          pinnedSymbolRef.current = null;
+          setSelectedCountry(currToReg[user.base_currency]);
+        }
+      }
       fetchPortfolio();
     }, 0);
     return () => clearTimeout(t);
-  }, [user?.id, fetchPortfolio]);
+  }, [user?.id, user?.base_currency, fetchPortfolio]);
 
   useEffect(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && selectedAsset?.symbol) {
@@ -460,13 +522,14 @@ export default function Home() {
   }, [selectedAsset?.symbol]);
 
   useEffect(() => {
+    if (!user?.id) return;
     const interval = setInterval(() => {
       fetchPortfolio();
       fetchHealthAndSessions();
       loadAssetsForFilter(selectedCountryRef.current, selectedCategoryRef.current, false);
     }, 10000);
     return () => clearInterval(interval);
-  }, [fetchPortfolio, fetchHealthAndSessions, loadAssetsForFilter]);
+  }, [user?.id, fetchPortfolio, fetchHealthAndSessions, loadAssetsForFilter]);
 
   // Global Symbol Search Modal query & region/category filter effect
   useEffect(() => {
@@ -573,10 +636,14 @@ export default function Home() {
     symbol: string;
     quantity: number;
     order_type: "BUY" | "SELL";
-    order_mode: "MARKET" | "LIMIT";
+    order_mode: "MARKET" | "LIMIT" | "STOP";
+    product_type?: "DELIVERY" | "INTRADAY" | "FUTURES" | "OPTIONS";
+    broker_plan?: "DISCOUNT" | "PRO";
     price?: number;
     stop_loss?: number;
     take_profit?: number;
+    trailing_sl?: number;
+    notes?: string;
   }) => {
     const res = await authFetch("/api/orders/place", {
       method: "POST",
@@ -589,17 +656,19 @@ export default function Home() {
       showToast(true, data.message);
       return { success: true, message: data.message };
     } else {
+      fetchPortfolio();
       showToast(false, data.detail || "Order execution failed");
       throw new Error(data.detail || "Order execution failed");
     }
   };
 
-  const handleClosePosition = async (symbol: string, quantity: number, orderType: string) => {
+  const handleClosePosition = async (symbol: string, quantity: number, orderType: string, productType?: string) => {
     await handleExecuteOrder({
       symbol,
       quantity,
       order_type: orderType === "SHORT" ? "BUY" : "SELL",
       order_mode: "MARKET",
+      product_type: (productType as "DELIVERY" | "INTRADAY" | "FUTURES" | "OPTIONS") || "DELIVERY",
     });
   };
 
@@ -607,15 +676,82 @@ export default function Home() {
     const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}`, { method: "DELETE" });
     if (res.ok) {
       fetchPortfolio();
-      showToast(true, "Pending Limit order cancelled.");
+      showToast(true, "Pending order cancelled.");
     }
   };
 
-  const handleResetPortfolio = async () => {
-    const res = await authFetch("/api/portfolio/reset", { method: "POST" });
+  const handleModifyPending = async (orderId: string, limitPrice: number, quantity: number) => {
+    const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit_price: limitPrice, quantity }),
+    });
     if (res.ok) {
       fetchPortfolio();
-      showToast(true, "Multi-currency paper wallets reset.");
+      showToast(true, "Pending order modified.");
+    } else {
+      const err = await res.json().catch(() => null);
+      showToast(false, err?.detail || "Modify order failed");
+    }
+  };
+
+  const handleUpdateRisk = async (positionId: string, sl: number | null, tp: number | null, tsl: number | null) => {
+    const res = await authFetch(`/api/positions/${encodeURIComponent(positionId)}/risk`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stop_loss: sl, take_profit: tp, trailing_sl: tsl }),
+    });
+    if (res.ok) {
+      fetchPortfolio();
+      showToast(true, "Position SL / Target / TSL updated.");
+    } else {
+      const err = await res.json().catch(() => null);
+      showToast(false, err?.detail || "Risk update failed");
+    }
+  };
+
+  const handleSquareOffAll = async (country?: string) => {
+    const res = await authFetch("/api/positions/square-off-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ country: country || null }),
+    });
+    const d = await res.json().catch(() => null);
+    if (res.ok) {
+      fetchPortfolio();
+      showToast(true, d?.message || "All positions squared off.");
+    } else {
+      showToast(false, d?.detail || "Square off failed");
+    }
+  };
+
+  const handleCopyPresetToOrder = (preset: OrderDraftPreset) => {
+    setOrderPreset(preset);
+    setRightTab("order");
+    openSymbolEverywhere(preset.symbol);
+  };
+
+  const handleSharePositionToFeed = async (pos: Position) => {
+    const res = await authFetch("/api/feed/ideas", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol: pos.symbol,
+        name: pos.name,
+        country: pos.country,
+        currency: pos.currency,
+        direction: pos.order_type === "SHORT" ? "BEARISH" : "BULLISH",
+        product_type: pos.product_type || "DELIVERY",
+        entry_price: pos.avg_price,
+        target_price: pos.take_profit,
+        stop_loss: pos.stop_loss,
+        timeframe: "1D",
+        thesis: `Live paper position: ${pos.order_type} ${pos.quantity} ${pos.symbol} (${pos.product_type || "DELIVERY"}) @ ${pos.avg_price}. Current MTM: ${pos.pnl >= 0 ? "+" : ""}${pos.pnl} (${pos.pnl_percent}%).`,
+      }),
+    });
+    if (res.ok) {
+      showToast(true, `Shared ${pos.symbol} setup to FrontPage Feed!`);
+      setActiveView("feed");
     }
   };
 
@@ -630,12 +766,31 @@ export default function Home() {
   const activeRegionCode = selectedAsset?.region || selectedAsset?.country || selectedCountry;
   const activeSession = sessions[activeRegionCode] || sessions[selectedCountry];
   const currentBalance = wallets[activeCurrency] ?? 0;
+  const activeHealth = capitalHealth[activeCurrency];
+  const anyCriticalHealth = Object.values(capitalHealth).find((h) => h.status !== "HEALTHY");
+  const healthToWarn = activeHealth && activeHealth.status !== "HEALTHY" ? activeHealth : anyCriticalHealth;
   const currSymbol = getCurrencySymbol(activeCurrency);
-  const activeWalletForAsset = selectedAsset ? wallets[selectedAsset.currency] ?? currentBalance : currentBalance;
   const searchListToDisplay =
     searchQuery.trim().length >= 1 || searchRegion !== "ALL" || searchCategory !== "all"
       ? searchResults
       : assets.slice(0, 20);
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen w-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-sky-600 flex items-center justify-center animate-pulse">
+          <Lock className="w-5 h-5 text-white" />
+        </div>
+        <div className="text-xs font-mono uppercase tracking-widest text-slate-400">
+          Opening Local PC Trading Vault...
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthGate />;
+  }
 
   return (
     <div className="h-screen w-screen overflow-hidden flex flex-col bg-[#EBECEF] text-[#131722] select-none">
@@ -667,7 +822,11 @@ export default function Home() {
                 </div>
 
                 {[
-                  { id: "chart" as const, label: "Superchart Terminal", icon: Activity },
+                  { id: "chart" as const, label: "Trade Terminal & Superchart", icon: Activity },
+                  { id: "portfolio" as const, label: `FrontPage Portfolio (${positions.length})`, icon: Briefcase },
+                  { id: "orders" as const, label: `Order Book & Receipts (${ordersHistory.length})`, icon: ListOrdered },
+                  { id: "taxes" as const, label: "Country Taxes, Brokerage & Analytics", icon: Landmark },
+                  { id: "feed" as const, label: "FrontPage Trade Ideas Feed", icon: Flame },
                   { id: "overview" as const, label: "Symbol Overview & Fundamentals", icon: Building2 },
                   { id: "multichart" as const, label: "16-Chart Sync Canvas", icon: Grid },
                   { id: "ipos" as const, label: `Live IPOs Calendar (${ipos.length})`, icon: Rocket },
@@ -821,24 +980,24 @@ export default function Home() {
                 setChartStyle(e.target.value as ChartStyle);
                 setActiveView("chart");
               }}
-              className="h-[28px] appearance-none bg-transparent hover:bg-[#F0F3FA] rounded-lg pl-2 pr-5 text-xs font-semibold text-[#131722] outline-none cursor-pointer whitespace-nowrap"
+              className="h-[28px] appearance-none bg-transparent hover:bg-[#F0F3FA] rounded-lg pl-1.5 pr-4 text-xs font-semibold text-[#131722] outline-none cursor-pointer whitespace-nowrap"
             >
-              <option value="candles">Candlestick Chart</option>
-              <option value="bar">Bar Chart (OHLC)</option>
-              <option value="line">Line Chart</option>
-              <option value="area">Area Chart</option>
-              <option value="heikin_ashi">Heikin-Ashi Chart</option>
-              <option value="renko">Renko Chart</option>
-              <option value="point_and_figure">Point &amp; Figure Chart</option>
-              <option value="kagi">Kagi Chart</option>
-              <option value="line_break">Line Break Chart</option>
-              <option value="range_bar">Range Bar Chart</option>
-              <option value="baseline">Baseline Chart</option>
+              <option value="candles">Candles</option>
+              <option value="bar">OHLC Bars</option>
+              <option value="line">Line</option>
+              <option value="area">Area</option>
+              <option value="heikin_ashi">Heikin-Ashi</option>
+              <option value="renko">Renko</option>
+              <option value="point_and_figure">Point &amp; Figure</option>
+              <option value="kagi">Kagi</option>
+              <option value="line_break">Line Break</option>
+              <option value="range_bar">Range Bar</option>
+              <option value="baseline">Baseline</option>
             </select>
-            <ChevronDown className="w-3 h-3 text-[#787B86] pointer-events-none absolute right-1" />
+            <ChevronDown className="w-3 h-3 text-[#787B86] pointer-events-none absolute right-0.5" />
           </div>
 
-          <div className="h-5 w-[1px] bg-[#E0E3EB] mx-1 hidden lg:block shrink-0" />
+          <div className="h-5 w-[1px] bg-[#E0E3EB] mx-0.5 hidden lg:block shrink-0" />
 
           {/* fx Indicators */}
           <button
@@ -848,10 +1007,10 @@ export default function Home() {
               setIndicatorsOpen(true);
             }}
             title={`Indicators & Strategies (${catalogCount})`}
-            className="h-[28px] px-2 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold flex items-center gap-1 transition shrink-0"
+            className="h-[28px] px-1.5 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold flex items-center gap-1 transition shrink-0"
           >
             <FunctionSquare className="w-3.5 h-3.5 text-[#2962FF]" />
-            <span className="hidden sm:inline">Indicators</span>
+            <span className="hidden xl:inline">Indicators</span>
           </button>
 
           {/* Alert Trigger */}
@@ -861,10 +1020,12 @@ export default function Home() {
               setActiveView("chart");
               setRightTab("alerts");
             }}
-            className="h-[28px] px-2 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold hidden lg:flex items-center gap-1 shrink-0 transition"
+            title="Price & RSI Alerts"
+            aria-label="Price & RSI Alerts"
+            className="h-[28px] px-1.5 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold hidden lg:flex items-center gap-1 shrink-0 transition"
           >
             <Bell className="w-3.5 h-3.5 text-[#6A6D78]" />
-            <span>Alert</span>
+            <span className="hidden 2xl:inline">Alert</span>
           </button>
 
           {/* Bar Replay Trigger */}
@@ -875,10 +1036,12 @@ export default function Home() {
               setBottomTab("replay");
               setBottomOpen(true);
             }}
-            className="h-[28px] px-2 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold hidden lg:flex items-center gap-1 shrink-0 transition"
+            title="Bar Replay Studio"
+            aria-label="Bar Replay Studio"
+            className="h-[28px] px-1.5 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold hidden lg:flex items-center gap-1 shrink-0 transition"
           >
             <PlayCircle className="w-3.5 h-3.5 text-[#6A6D78]" />
-            <span>Replay</span>
+            <span className="hidden 2xl:inline">Replay</span>
           </button>
 
           {/* 16x Layout Split */}
@@ -887,7 +1050,7 @@ export default function Home() {
             onClick={() => setActiveView(activeView === "multichart" ? "chart" : "multichart")}
             aria-label="16-Chart Split Layout"
             title="16-Chart Split Workspace"
-            className={`h-[28px] px-2 rounded-lg text-xs font-semibold hidden xl:flex items-center gap-1 shrink-0 transition ${
+            className={`h-[28px] px-1.5 rounded-lg text-xs font-semibold hidden xl:flex items-center gap-1 shrink-0 transition ${
               activeView === "multichart" ? "bg-[#F0F3FA] text-[#2962FF]" : "text-[#131722] hover:bg-[#F0F3FA]"
             }`}
           >
@@ -952,38 +1115,34 @@ export default function Home() {
             </div>
           </div>
 
-          {resetConfirm ? (
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => {
-                  handleResetPortfolio();
-                  setResetConfirm(false);
-                }}
-                className="h-[28px] px-2 bg-[#F23645] text-white rounded-lg text-[11px] font-bold"
-              >
-                Confirm
-              </button>
-              <button
-                type="button"
-                onClick={() => setResetConfirm(false)}
-                aria-label="Cancel Reset"
-                className="h-[28px] px-1.5 bg-[#F0F3FA] text-[#787B86] rounded-lg text-[11px]"
-              >
-                ✕
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setResetConfirm(true)}
-              aria-label="Reset Multi-Currency Virtual Wallets"
-              title="Reset Paper Wallets"
-              className="w-[28px] h-[28px] rounded-lg hover:bg-[#F0F3FA] text-[#6A6D78] hover:text-[#131722] flex items-center justify-center transition"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-            </button>
-          )}
+          <span
+            title="Fixed starting capital — wallet resets permanently disabled"
+            className="h-[28px] px-2 rounded-lg bg-[#E8F5E9] text-[#089981] text-[10px] font-bold hidden md:inline-flex items-center gap-1 shrink-0"
+          >
+            <Lock className="w-3 h-3" /> Fixed
+          </span>
+
+          <button
+            type="button"
+            onClick={() => setActivityOpen(true)}
+            aria-label="Persistent Activity Audit Log"
+            title="Local PC Persistent Audit Trail"
+            className="h-[28px] px-2 rounded-lg bg-[#F8F9FD] hover:bg-[#F0F3FA] border border-[#E0E3EB] text-[#131722] text-[11px] font-bold hidden sm:inline-flex items-center gap-1 shrink-0 transition"
+          >
+            <ClipboardList className="w-3.5 h-3.5 text-[#2962FF]" />
+            <span className="hidden 2xl:inline">Audit Log</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setDisclaimerOpen(true)}
+            aria-label="Risk and Regulatory Disclaimers"
+            title="View Risk, Leverage & Regulatory Disclaimers"
+            className="h-[28px] px-2 rounded-lg bg-[#FFEBEE] hover:bg-[#F23645] text-[#F23645] hover:text-white text-[11px] font-bold inline-flex items-center gap-1 shrink-0 transition"
+          >
+            <ShieldAlert className="w-3.5 h-3.5" />
+            <span className="hidden xl:inline">Risks</span>
+          </button>
 
           {/* Overview / Superchart Primary Action Pill */}
           <button
@@ -1005,21 +1164,17 @@ export default function Home() {
             {theme === "dark" ? <Sun className="w-3.5 h-3.5 text-amber-400" /> : <Moon className="w-3.5 h-3.5" />}
           </button>
 
-          {/* Multi-Tenant Isolated Account Trigger */}
+          {/* Single-Owner PC Account Trigger */}
           <button
             type="button"
             onClick={() => setAuthOpen(true)}
-            aria-label="Account & Isolated Workspace"
-            title={user && !user.is_guest ? `Signed in: ${user.email}` : "Sign In / Register Isolated Account"}
-            className={`h-[28px] px-2 rounded-lg text-[11px] font-bold flex items-center gap-1 transition shrink-0 ${
-              user && !user.is_guest
-                ? "bg-[#E8F5E9] text-[#089981]"
-                : "bg-[#F0F3FA] hover:bg-[#E0E3EB] text-[#131722]"
-            }`}
+            aria-label="Owner Vault Profile"
+            title={`Signed in: ${user.email}`}
+            className="h-[28px] px-2 rounded-lg text-[11px] font-bold flex items-center gap-1 transition shrink-0 bg-[#E8F5E9] text-[#089981]"
           >
             <User className="w-3.5 h-3.5" />
             <span className="hidden xl:inline max-w-[76px] truncate">
-              {user && !user.is_guest ? user.email.split("@")[0] : "Account"}
+              {user.display_name || user.email.split("@")[0]}
             </span>
           </button>
 
@@ -1047,6 +1202,90 @@ export default function Home() {
           </button>
         </div>
       </header>
+
+      {/* FrontPage TradeLab Navigation & Live Country Index Bar */}
+      <div className="h-[34px] bg-[#F8F9FD] border-b border-[#E0E3EB] px-2 sm:px-3 flex items-center justify-between gap-3 shrink-0 overflow-x-auto scrollbar-none">
+        <nav aria-label="FrontPage Paper Trade Tabs" className="flex items-center gap-1 shrink-0">
+          {(
+            [
+              { id: "chart" as const, label: "Trade", icon: Activity },
+              { id: "portfolio" as const, label: `Portfolio (${positions.length})`, icon: Briefcase },
+              { id: "orders" as const, label: `Orders (${pendingOrders.length + ordersHistory.length})`, icon: ListOrdered },
+              { id: "taxes" as const, label: "Taxes & Charges", icon: Landmark },
+              { id: "feed" as const, label: "Ideas Feed", icon: Flame },
+            ] as const
+          ).map((t) => {
+            const Icon = t.icon;
+            const active = activeView === t.id;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setActiveView(t.id)}
+                className={`h-[26px] px-2.5 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition whitespace-nowrap ${
+                  active
+                    ? "bg-[#2962FF] text-white shadow-xs"
+                    : "text-[#131722] hover:bg-[#E0E3EB]/70"
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                <span>{t.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Live Active Country Indices Ticker */}
+        <div className="hidden lg:flex items-center gap-2 text-[11px] font-mono min-w-0 overflow-x-auto scrollbar-none">
+          <span className="text-[10px] font-sans font-bold text-[#787B86] uppercase inline-flex items-center gap-1.5">
+            <CountryFlag code={selectedCountry === "ALL" ? "IND" : selectedCountry} /> Indices:
+          </span>
+          {(COUNTRY_META[selectedCountry === "ALL" ? "IND" : selectedCountry] || COUNTRY_META.IND).indices.map((idxSym) => {
+            const q = indexQuotes[idxSym];
+            const bull = (q?.change_percent ?? 0) >= 0;
+            const cleanLbl = idxSym.replace("^NSEI", "NIFTY 50").replace("^BSESN", "SENSEX").replace("^NSEBANK", "BANKNIFTY").replace("^GSPC", "S&P 500").replace("^IXIC", "NASDAQ").replace("^DJI", "DOW").replace("^GSPTSE", "TSX").replace("000001.SS", "SSE").replace("399001.SZ", "SZSE").replace("^GDAXI", "DAX").replace("^FTSE", "FTSE").replace("^FCHI", "CAC40");
+            return (
+              <button
+                key={idxSym}
+                type="button"
+                onClick={() => openSymbolEverywhere(idxSym)}
+                className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#FFFFFF] border border-[#E0E3EB] hover:border-[#2962FF] transition tabular-nums"
+              >
+                <span className="font-bold text-[#131722]">{cleanLbl}</span>
+                <span className="text-[#131722]">{q?.price ? formatNumber(q.price, 2) : "--"}</span>
+                {q?.price ? (
+                  <span className={bull ? "text-[#089981] font-bold" : "text-[#F23645] font-bold"}>
+                    {bull ? "+" : ""}{q.change_percent.toFixed(2)}%
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Progressive Low Capital Warning Strip (Fires <30%, <15%, <5%) */}
+      {healthToWarn && (
+        <div
+          className={`px-3 py-1.5 text-[11px] font-bold flex items-center justify-between gap-2 shrink-0 border-b ${
+            healthToWarn.status === "EXHAUSTED" || healthToWarn.status === "CRITICAL"
+              ? "bg-[#FFEBEE] border-[#F23645]/30 text-[#B71C1C]"
+              : "bg-amber-50 border-amber-300 text-amber-900"
+          }`}
+        >
+          <span className="flex items-center gap-1.5 truncate">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span>{healthToWarn.warning_message}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setActiveView("portfolio")}
+            className="px-2 py-0.5 rounded bg-white/80 hover:bg-white text-[10px] font-extrabold shrink-0"
+          >
+            Inspect Capital →
+          </button>
+        </div>
+      )}
 
       {/* Non-blocking Offline Reconnect Strip */}
       {backendOffline && (
@@ -1107,6 +1346,7 @@ export default function Home() {
               onCloseIndicators={() => setIndicatorsOpen(false)}
               onCatalogLoaded={setCatalogCount}
               refreshNonce={refreshNonce}
+              openPositions={positions}
               onQuickOrder={(side) =>
                 selectedAsset &&
                 handleExecuteOrder({
@@ -1128,12 +1368,14 @@ export default function Home() {
               onSelectTab={setBottomTab}
               selectedSymbol={selectedAsset?.symbol || "RELIANCE.NS"}
               activeCurrency={activeCurrency}
-              walletBalance={activeWalletForAsset}
+              walletBalance={currentBalance}
               positions={positions}
               pendingOrders={pendingOrders}
               ordersHistory={ordersHistory}
+              rejectedOrders={rejectedOrders}
               onClosePosition={handleClosePosition}
               onCancelPending={handleCancelPending}
+              onSquareOffAll={() => handleSquareOffAll(selectedCountry === "ALL" ? undefined : selectedCountry)}
               onSelectSymbolFromScreener={(sym) => openSymbolEverywhere(sym)}
             />
           </div>
@@ -1148,9 +1390,19 @@ export default function Home() {
             onSelectCategory={setSelectedCategory}
             assets={assets}
             selectedAsset={selectedAsset}
-            onSelectSymbol={(sym, nm) => openSymbolEverywhere(sym, nm)}
+            onSelectSymbol={(sym, nm) => {
+              setOrderPreset(null);
+              openSymbolEverywhere(sym, nm);
+            }}
+            onQuickTradeFromWatchlist={(asset, side) => {
+              setOrderPreset({ symbol: asset.symbol, side });
+              setRightTab("order");
+              openSymbolEverywhere(asset.symbol, asset.name);
+            }}
             onOpenSearch={() => setSearchOpen(true)}
             wallets={wallets}
+            capitalHealth={capitalHealth}
+            orderPreset={orderPreset}
             onExecuteOrder={handleExecuteOrder}
             latestNewsAlert={latestNewsAlert}
             isMarketOpen={activeSession?.open}
@@ -1158,6 +1410,73 @@ export default function Home() {
             onOpenIpos={() => setActiveView("ipos")}
             onOpenMacro={() => setActiveView("macro")}
           />
+        </div>
+      )}
+
+      {activeView === "portfolio" && (
+        <div className="flex-1 min-h-0 overflow-y-auto bg-[#F8F9FD] p-4">
+          <div className="max-w-[1440px] mx-auto">
+            <FrontPagePortfolio
+              selectedCountry={selectedCountry}
+              onSelectCountry={handleSelectCountry}
+              wallets={wallets}
+              walletDetails={walletDetails}
+              capitalHealth={capitalHealth}
+              positions={positions}
+              closedTrades={closedTrades}
+              taxSummaryByCountry={taxSummaryByCountry}
+              analyticsByCountry={analyticsByCountry}
+              onClosePosition={handleClosePosition}
+              onSquareOffAll={handleSquareOffAll}
+              onUpdateRisk={handleUpdateRisk}
+              onOpenSymbol={(sym) => openSymbolEverywhere(sym)}
+              onShareIdea={handleSharePositionToFeed}
+            />
+          </div>
+        </div>
+      )}
+
+      {activeView === "orders" && (
+        <div className="flex-1 min-h-0 overflow-y-auto bg-[#F8F9FD] p-4">
+          <div className="max-w-[1440px] mx-auto">
+            <FrontPageOrders
+              selectedCountry={selectedCountry}
+              pendingOrders={pendingOrders}
+              ordersHistory={ordersHistory}
+              rejectedOrders={rejectedOrders}
+              onCancelPending={handleCancelPending}
+              onModifyPending={handleModifyPending}
+              onOpenSymbol={(sym) => openSymbolEverywhere(sym)}
+            />
+          </div>
+        </div>
+      )}
+
+      {activeView === "taxes" && (
+        <div className="flex-1 min-h-0 overflow-y-auto bg-[#F8F9FD] p-4">
+          <div className="max-w-[1440px] mx-auto">
+            <FrontPageTaxCenter
+              selectedCountry={selectedCountry}
+              taxSummaryByCountry={taxSummaryByCountry}
+              analyticsByCountry={analyticsByCountry}
+            />
+          </div>
+        </div>
+      )}
+
+      {activeView === "feed" && (
+        <div className="flex-1 min-h-0 overflow-y-auto bg-[#F8F9FD] p-4">
+          <div className="max-w-[1280px] mx-auto">
+            <FrontPageFeed
+              selectedCountry={selectedCountry}
+              activeSymbol={selectedAsset?.symbol}
+              activeSymbolName={selectedAsset?.name}
+              activePrice={selectedAsset?.price}
+              activeCurrency={selectedAsset?.currency}
+              onCopyToPaperTrade={handleCopyPresetToOrder}
+              onOpenSymbol={(sym) => openSymbolEverywhere(sym)}
+            />
+          </div>
         </div>
       )}
 
@@ -1334,11 +1653,39 @@ export default function Home() {
         </div>
       )}
 
+      <footer className="h-[24px] px-3 bg-[#FFFFFF] border-t border-[#E0E3EB] flex items-center justify-between gap-3 text-[10px] text-[#787B86] shrink-0">
+        <div className="flex items-center gap-3 min-w-0 truncate">
+          <span className="inline-flex items-center gap-1 font-semibold text-[#131722]">
+            <Database className="w-3 h-3 text-[#089981]" /> Local PC Vault (Multi-Profile)
+          </span>
+          <span className="hidden sm:inline">Fixed Starting Capital · Resets Disabled</span>
+          <button
+            type="button"
+            onClick={() => setActivityOpen(true)}
+            className="text-[#2962FF] font-bold hover:underline"
+          >
+            Activity Audit Log
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={() => setDisclaimerOpen(true)}
+          className="text-[#F23645] font-bold hover:underline truncate"
+        >
+          Educational Simulation · View Risk, Leverage &amp; Statutory Tax Disclaimers
+        </button>
+      </footer>
+
       <AuthModal
         open={authOpen}
         onClose={() => setAuthOpen(false)}
         onAuthenticated={fetchPortfolio}
+        onOpenDisclaimer={() => setDisclaimerOpen(true)}
+        onOpenActivityLog={() => setActivityOpen(true)}
       />
+
+      <RiskDisclaimerModal open={disclaimerOpen} onClose={() => setDisclaimerOpen(false)} />
+      <ActivityLogPanel open={activityOpen} onClose={() => setActivityOpen(false)} />
     </div>
   );
 }

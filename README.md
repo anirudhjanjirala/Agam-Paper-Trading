@@ -5,7 +5,7 @@
 <h1 align="center">Agam Paper Trading Platform</h1>
 
 <p align="center">
-  <strong>100% Free &amp; Open-Source Multi-Tenant Institutional Trading Terminal, 10-Style Superchart &amp; Fundamentals Platform</strong>
+  <strong>100% Free &amp; Open-Source Local PC Institutional Paper Trading Terminal, 10-Style Superchart &amp; Live Country Tax Engine</strong>
 </p>
 
 <p align="center">
@@ -37,7 +37,8 @@ It brings together:
 - **Full listing-start historical charts (`ALL` / `max`)**: Load decades of daily/weekly/monthly candles from a company's early listing dates (e.g., `AAPL` from `1980-12-12` — `11,582` daily bars; `RELIANCE.NS` from `1996-01-01` — `7,751` daily bars; `SHOP.TO` from `2015-05-21` — `2,891` daily bars).
 - **All 10 TradingView-Grade Chart Types** (plus Baseline): Candlestick, OHLC Bar, Line, Area, Heikin-Ashi, Renko, **Point & Figure (`X` / `O`)**, **Kagi (`Yang` / `Yin`)**, **Three Line Break**, and **Range Bar** charts.
 - **Per-Symbol Isolated Line Drawings & `1px`–`4px` Line Weights**: Draw Trend Lines, Horizontal Rays, Parallel Channels, Fibonacci Retracements, and Long/Short Position Rulers with selectable `1px`–`4px` stroke thickness. Drawings are isolated per user and per ticker (`chart:<symbol>`) so annotations never bleed across stocks.
-- **Multi-Tenant Paper Trading Isolation**: JWT authentication (HTTP-only cookies + workspace tokens), isolated multi-currency virtual wallets (`INR`, `USD`, `CAD`, `CNY`, `EUR`, `GBP`), partial/full long & short order netting with accurate `realized_pnl`, pending Limit/Stop triggers, non-expiring alerts, and cloud-synced watchlists/layouts.
+- **Local PC Multi-Profile Vault & Fixed Capital Discipline**: Multi-profile account system on a single PC supporting Sign Up (add traders anytime), password-verified profile switching, and password-verified profile removal, plus non-resettable fixed multi-currency capital (`INR`, `USD`, `CAD`, `CNY`, `EUR`, `GBP`) with progressive low-capital warnings (`<30%`, `<15%`, `<5%`), persistent SQLite WAL activity/audit trail, asset-class & country-specific statutory taxes & brokerage (`IND`, `USA`, `CANADA`, `CHINA`, `EU` across Stocks, ETFs, Commodities/Futures, Forex, Bonds), auto-refreshed global markets, and risk-based position sizer.
+- **Notice / Disclaimer**: Educational simulation only — no real funds, exchange routing, or financial advice. Read in-app Risk & Regulatory Disclaimers before trading.
 - **Dual-Theme & Responsive UI**: Zero-flicker Light (`#FFFFFF`) and Dark (`#0B0E14`) themes with SSR-safe hydration (`useSyncExternalStore`) and mobile (`390×844`) overlay drawers.
 
 ---

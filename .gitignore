@@ -6,9 +6,12 @@ __pycache__/
 .venv/
 venv/
 backend/*.db
+backend/*.db-*
 backend/*.sqlite*
 backend/agam_portfolio.db
+backend/tests/*.db*
 backend/.agam_jwt_secret
+backend/.agam_market_cache.json
 .agam_jwt_secret
 
 # Next.js / Node

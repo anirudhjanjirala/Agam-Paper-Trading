@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState } from "react";
-import { Wallet, RotateCcw, Activity } from "lucide-react";
+import React from "react";
+import { Wallet, ShieldCheck, Activity } from "lucide-react";
 import { formatNumber, getCurrencySymbol } from "@/lib/format";
 
 interface SessionInfo {
@@ -16,7 +16,6 @@ interface NavbarProps {
   wallets: Record<string, number>;
   activeCurrency: string;
   onSelectCurrency: (currency: string) => void;
-  onResetPortfolio: () => void;
   sessions?: Record<string, SessionInfo>;
   universeTotal?: number;
 }
@@ -27,19 +26,16 @@ export default function Navbar({
   wallets,
   activeCurrency,
   onSelectCurrency,
-  onResetPortfolio,
   sessions,
   universeTotal,
 }: NavbarProps) {
-  const [resetConfirm, setResetConfirm] = useState(false);
-
   const regions = [
-    { code: "IND", name: "India (NSE/BSE/MCX/G-Sec)", flag: "🇮🇳" },
-    { code: "USA", name: "USA (NASDAQ/NYSE/OPRA/UST)", flag: "🇺🇸" },
-    { code: "CANADA", name: "Canada (TSX/TSXV/Bonds)", flag: "🇨🇦" },
-    { code: "CHINA", name: "China (SSE/SZSE/CGB)", flag: "🇨🇳" },
-    { code: "EU", name: "Europe & UK (Euronext/XETRA/LSE)", flag: "🇪🇺" },
-    { code: "ALL", name: "Global All Regions", flag: "🌍" },
+    { code: "IND", name: "India (NSE/BSE/MCX/G-Sec)" },
+    { code: "USA", name: "USA (NASDAQ/NYSE/OPRA/UST)" },
+    { code: "CANADA", name: "Canada (TSX/TSXV/Bonds)" },
+    { code: "CHINA", name: "China (SSE/SZSE/CGB)" },
+    { code: "EU", name: "Europe & UK (Euronext/XETRA/LSE)" },
+    { code: "ALL", name: "Global All Regions" },
   ];
 
   const currentBalance = wallets[activeCurrency] ?? 0;
@@ -110,7 +106,7 @@ export default function Navbar({
           >
             {regions.map((c) => (
               <option key={c.code} value={c.code} className="bg-[#FFFFFF] text-[#131722]">
-                {c.flag} {c.name}
+                {c.code === "ALL" ? "ALL" : c.code} — {c.name}
               </option>
             ))}
           </select>
@@ -139,33 +135,12 @@ export default function Navbar({
             </div>
           </div>
 
-          {resetConfirm ? (
-            <div className="flex items-center gap-1">
-              <button
-                onClick={() => {
-                  onResetPortfolio();
-                  setResetConfirm(false);
-                }}
-                className="px-2.5 py-1.5 bg-[#F23645] hover:opacity-90 text-white rounded-lg text-xs font-bold transition"
-              >
-                Confirm
-              </button>
-              <button
-                onClick={() => setResetConfirm(false)}
-                className="px-2 py-1.5 bg-[#F0F3FA] text-[#787B86] rounded-lg text-xs transition"
-              >
-                ✕
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={() => setResetConfirm(true)}
-              title="Reset Multi-Currency Virtual Wallets"
-              className="p-2 bg-[#F8F9FD] hover:bg-[#F0F3FA] border border-[#E0E3EB] text-[#787B86] hover:text-[#131722] rounded-xl transition"
-            >
-              <RotateCcw className="w-4 h-4" />
-            </button>
-          )}
+          <span
+            title="Fixed starting capital — wallet resets are permanently disabled"
+            className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#E8F5E9] text-[#089981] text-[11px] font-bold"
+          >
+            <ShieldCheck className="w-3.5 h-3.5" /> Fixed Capital
+          </span>
         </div>
       </div>
     </header>

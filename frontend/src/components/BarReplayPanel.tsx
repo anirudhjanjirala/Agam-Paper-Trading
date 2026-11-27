@@ -38,6 +38,7 @@ export default function BarReplayPanel({ defaultSymbol }: { defaultSymbol: strin
   const [playing, setPlaying] = useState(false);
   const [speedMs, setSpeedMs] = useState(900);
   const [qty, setQty] = useState(10);
+  const [tradeErr, setTradeErr] = useState<string | null>(null);
 
   const chartEl = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -83,12 +84,18 @@ export default function BarReplayPanel({ defaultSymbol }: { defaultSymbol: strin
 
   const tradeReplay = async (side: "BUY" | "SELL") => {
     if (!session) return;
+    setTradeErr(null);
     const res = await fetch(apiUrl(`/api/replay/${session.session_id}/trade`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ side, quantity: qty }),
     });
-    if (res.ok) setSession(await res.json());
+    if (res.ok) {
+      setSession(await res.json());
+    } else {
+      const errBody = await res.json().catch(() => null);
+      setTradeErr(errBody?.detail || "Replay trade failed");
+    }
   };
 
   useEffect(() => {
@@ -274,6 +281,11 @@ export default function BarReplayPanel({ defaultSymbol }: { defaultSymbol: strin
               onChange={(e) => setQty(Math.max(1, Number(e.target.value) || 1))}
               className="w-full bg-[#FFFFFF] border border-[#E0E3EB] rounded-lg px-3 py-1.5 text-[#131722] font-mono"
             />
+            {tradeErr && (
+              <div className="px-2.5 py-1.5 rounded-lg bg-[#FFEBEE] text-[#F23645] text-[11px] font-semibold">
+                {tradeErr}
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => tradeReplay("BUY")}

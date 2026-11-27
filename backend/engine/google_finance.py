@@ -106,6 +106,18 @@ class GoogleFinanceEngine:
         self._yahoo_cooldown_until: float = 0.0
         self._yahoo_client: Optional[httpx.Client] = None
         self._yahoo_cookie_ready: bool = False
+        self._http_lock = threading.Lock()
+        self._http_client: Optional[httpx.Client] = None
+
+    def _get_http_client(self) -> httpx.Client:
+        with self._http_lock:
+            if self._http_client is None or self._http_client.is_closed:
+                self._http_client = httpx.Client(
+                    timeout=8.0,
+                    follow_redirects=True,
+                    limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
+                )
+            return self._http_client
 
     def _headers(self) -> dict:
         return {
@@ -405,14 +417,13 @@ class GoogleFinanceEngine:
         if cached and (now - cached[0]) < self.quote_ttl:
             return cached[1]
 
+        client = self._get_http_client()
         candidates = to_google_finance_ticker(symbol, exchange_hint=exchange_hint)
         for gf_ticker in candidates:
             try:
-                r = httpx.get(
+                r = client.get(
                     f"https://www.google.com/finance/quote/{gf_ticker}",
                     headers=self._headers(),
-                    timeout=8.0,
-                    follow_redirects=True,
                 )
                 if r.status_code != 200:
                     continue
@@ -527,13 +538,14 @@ class GoogleFinanceEngine:
             except ValueError:
                 return 0.0
 
+        client = self._get_http_client()
         for asset_cls in ("stocks", "etf"):
             try:
                 url = (
                     f"https://api.nasdaq.com/api/quote/{symbol}/historical"
                     f"?assetclass={asset_cls}&fromdate={from_s}&limit=99999&todate={to_s}"
                 )
-                r = httpx.get(url, headers={"User-Agent": random.choice(USER_AGENTS)}, timeout=8.0)
+                r = client.get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
                 if r.status_code != 200:
                     continue
                 rows = ((r.json().get("data") or {}).get("tradesTable") or {}).get("rows") or []

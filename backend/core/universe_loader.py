@@ -3,10 +3,12 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
 import threading
 import time
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from typing import Dict, List, Optional
 
 import httpx
@@ -119,6 +121,8 @@ class GlobalUniverseStore:
                     row["change"] = float(q.get("change", row["change"]))
                     row["change_percent"] = float(q.get("change_percent", row["change_percent"]))
                     row["volume"] = int(q.get("volume", row["volume"]))
+                    if "name" in q and q["name"] and row.get("name") == row.get("symbol"):
+                        row["name"] = str(q["name"])
                     if "rsi_14" in q:
                         row["rsi_14"] = float(q["rsi_14"])
                     if "as_of" in q:
@@ -340,7 +344,64 @@ class GlobalUniverseStore:
             except Exception as e:
                 print("NSE G-Sec err:", e)
 
-        # 5. Core Indian Indices, BSE Key Benchmarks, Currency F&O & MCX Proxies
+            # 5. All NSE Live Indices (~139 Indices: Sectoral, Broad Market, Thematic)
+            try:
+                r_idx = client.get("https://www.nseindia.com/api/allIndices")
+                if r_idx.status_code == 200:
+                    idx_rows = (r_idx.json() or {}).get("data", [])
+                    idx_alias = {"NIFTY 50": "^NSEI", "NIFTY BANK": "^NSEBANK", "INDIA VIX": "^INDIAVIX"}
+                    for row in idx_rows:
+                        idx_name = (row.get("index") or row.get("indexSymbol") or "").strip()
+                        if not idx_name:
+                            continue
+                        sym = idx_alias.get(idx_name.upper()) or (
+                            "^" + re.sub(r"[^A-Z0-9]+", "-", idx_name.upper()).strip("-") + ".NS"
+                        )
+                        lp = _parse_num(row.get("last"))
+                        pc = _parse_num(row.get("previousClose")) or lp
+                        chg = round(lp - pc, 2)
+                        pct = _parse_num(row.get("percentChange"))
+                        records.append({
+                            "symbol": sym,
+                            "name": f"{idx_name} (NSE Index)",
+                            "region": "IND",
+                            "exchange": "NSE",
+                            "category": "indices",
+                            "currency": "INR",
+                            "isin": "",
+                            "price": lp, "prev_close": pc, "change": chg, "change_percent": pct,
+                            "volume": 0, "rsi_14": 50.0,
+                            "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                        })
+            except Exception as e:
+                print("NSE allIndices err:", e)
+
+            # 6. Active BSE Listed Equities (.BO)
+            try:
+                r_bse = client.get(
+                    "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w?Group=&Scripcode=&industry=&segment=Equity&status=Active",
+                    headers={"User-Agent": headers["User-Agent"], "Referer": "https://www.bseindia.com/"},
+                )
+                if r_bse.status_code == 200 and isinstance(r_bse.json(), list):
+                    for row in r_bse.json():
+                        sid = (row.get("scrip_id") or "").strip()
+                        if not sid or any(ch in sid for ch in (" ", "$", "#")):
+                            continue
+                        records.append({
+                            "symbol": f"{sid}.BO",
+                            "name": (row.get("Scrip_Name") or sid).strip(),
+                            "region": "IND",
+                            "exchange": "BSE",
+                            "category": "stocks",
+                            "currency": "INR",
+                            "isin": (row.get("ISIN_NUMBER") or "").strip(),
+                            "price": 0.0, "prev_close": 0.0, "change": 0.0, "change_percent": 0.0,
+                            "volume": 0, "rsi_14": 50.0, "as_of": "",
+                        })
+            except Exception as e:
+                print("BSE Scrip Master err:", e)
+
+        # 7. Core Indian Indices, BSE Benchmarks, MCX Proxies & Major Currency Pairs
         ind_benchmarks = [
             {"symbol": "^NSEI", "name": "NIFTY 50 Index", "exchange": "NSE", "category": "indices"},
             {"symbol": "^BSESN", "name": "BSE SENSEX Index", "exchange": "BSE", "category": "indices"},
@@ -356,6 +417,9 @@ class GlobalUniverseStore:
             {"symbol": "EURINR=X", "name": "EUR/INR Currency Pair", "exchange": "NSE-FX", "category": "forex"},
             {"symbol": "GBPINR=X", "name": "GBP/INR Currency Pair", "exchange": "NSE-FX", "category": "forex"},
             {"symbol": "JPYINR=X", "name": "JPY/INR Currency Pair", "exchange": "NSE-FX", "category": "forex"},
+            {"symbol": "AUDINR=X", "name": "AUD/INR Currency Pair", "exchange": "NSE-FX", "category": "forex"},
+            {"symbol": "CHFINR=X", "name": "CHF/INR Currency Pair", "exchange": "NSE-FX", "category": "forex"},
+            {"symbol": "CADINR=X", "name": "CAD/INR Currency Pair", "exchange": "NSE-FX", "category": "forex"},
         ]
         for b in ind_benchmarks:
             records.append({
@@ -426,23 +490,48 @@ class GlobalUniverseStore:
             {"symbol": "^GSPC", "name": "S&P 500 Index", "exchange": "CBOE", "category": "indices"},
             {"symbol": "^IXIC", "name": "NASDAQ Composite", "exchange": "NASDAQ", "category": "indices"},
             {"symbol": "^DJI", "name": "Dow Jones Industrial Average", "exchange": "NYSE", "category": "indices"},
+            {"symbol": "^RUT", "name": "Russell 2000 Index", "exchange": "FTSE Russell", "category": "indices"},
             {"symbol": "^VIX", "name": "CBOE Volatility Index", "exchange": "CBOE", "category": "indices"},
             {"symbol": "ES=F", "name": "E-Mini S&P 500 Futures", "exchange": "CME", "category": "commodities"},
             {"symbol": "NQ=F", "name": "E-Mini NASDAQ 100 Futures", "exchange": "CME", "category": "commodities"},
+            {"symbol": "YM=F", "name": "Mini Dow Jones Futures", "exchange": "CBOT", "category": "commodities"},
+            {"symbol": "RTY=F", "name": "E-Mini Russell 2000 Futures", "exchange": "CME", "category": "commodities"},
             {"symbol": "GC=F", "name": "Gold Futures (COMEX)", "exchange": "COMEX", "category": "commodities"},
             {"symbol": "SI=F", "name": "Silver Futures (COMEX)", "exchange": "COMEX", "category": "commodities"},
+            {"symbol": "HG=F", "name": "Copper Futures (COMEX)", "exchange": "COMEX", "category": "commodities"},
+            {"symbol": "PL=F", "name": "Platinum Futures (NYMEX)", "exchange": "NYMEX", "category": "commodities"},
             {"symbol": "CL=F", "name": "WTI Crude Oil Futures", "exchange": "NYMEX", "category": "commodities"},
+            {"symbol": "BZ=F", "name": "Brent Crude Oil Futures", "exchange": "ICE", "category": "commodities"},
             {"symbol": "NG=F", "name": "Natural Gas Futures", "exchange": "NYMEX", "category": "commodities"},
+            {"symbol": "ZC=F", "name": "Corn Futures (CBOT)", "exchange": "CBOT", "category": "commodities"},
+            {"symbol": "ZW=F", "name": "Wheat Futures (CBOT)", "exchange": "CBOT", "category": "commodities"},
+            {"symbol": "ZS=F", "name": "Soybean Futures (CBOT)", "exchange": "CBOT", "category": "commodities"},
             {"symbol": "^TNX", "name": "US 10-Yr Treasury Yield", "exchange": "UST", "category": "bonds"},
             {"symbol": "^TYX", "name": "US 30-Yr Treasury Yield", "exchange": "UST", "category": "bonds"},
             {"symbol": "^FVX", "name": "US 5-Yr Treasury Yield", "exchange": "UST", "category": "bonds"},
+            {"symbol": "ZN=F", "name": "10-Yr US Treasury Note Futures", "exchange": "CBOT", "category": "bonds"},
+            {"symbol": "ZB=F", "name": "30-Yr US Treasury Bond Futures", "exchange": "CBOT", "category": "bonds"},
+            {"symbol": "SHY", "name": "iShares 1-3 Year Treasury Bond ETF", "exchange": "NASDAQ", "category": "bonds"},
+            {"symbol": "IEF", "name": "iShares 7-10 Year Treasury Bond ETF", "exchange": "NASDAQ", "category": "bonds"},
             {"symbol": "TLT", "name": "iShares 20+ Year Treasury Bond ETF", "exchange": "NASDAQ", "category": "bonds"},
+            {"symbol": "BND", "name": "Vanguard Total Bond Market ETF", "exchange": "NASDAQ", "category": "bonds"},
             {"symbol": "LQD", "name": "iShares Investment Grade Corp Bond", "exchange": "NYSE", "category": "bonds"},
             {"symbol": "HYG", "name": "iShares High Yield Corp Bond", "exchange": "NYSE", "category": "bonds"},
-            {"symbol": "EURUSD=X", "name": "EUR/USD Currency Pair", "exchange": "FOREX", "category": "forex"},
-            {"symbol": "GBPUSD=X", "name": "GBP/USD Currency Pair", "exchange": "FOREX", "category": "forex"},
-            {"symbol": "USDJPY=X", "name": "USD/JPY Currency Pair", "exchange": "FOREX", "category": "forex"},
+            {"symbol": "TIP", "name": "iShares TIPS Inflation-Linked Bond ETF", "exchange": "NYSE", "category": "bonds"},
         ]
+        # Dynamic global FX currency pairs pulled from Frankfurter ECB feed
+        try:
+            rfx = httpx.get("https://api.frankfurter.dev/v1/currencies", timeout=8.0)
+            if rfx.status_code == 200 and isinstance(rfx.json(), dict):
+                for cur, cname in rfx.json().items():
+                    if cur == "USD":
+                        continue
+                    pair = f"{cur}USD=X" if cur in ("EUR", "GBP", "AUD", "NZD") else f"USD{cur}=X"
+                    label = f"{cur}/USD" if cur in ("EUR", "GBP", "AUD", "NZD") else f"USD/{cur}"
+                    usa_macro.append({"symbol": pair, "name": f"{label} ({cname})", "exchange": "FOREX", "category": "forex"})
+        except Exception:
+            for pair, label in [("EURUSD=X", "EUR/USD"), ("GBPUSD=X", "GBP/USD"), ("USDJPY=X", "USD/JPY"), ("USDCHF=X", "USD/CHF"), ("AUDUSD=X", "AUD/USD")]:
+                usa_macro.append({"symbol": pair, "name": f"{label} Currency Pair", "exchange": "FOREX", "category": "forex"})
         for b in usa_macro:
             records.append({
                 "symbol": b["symbol"], "name": b["name"], "region": "USA", "exchange": b["exchange"],
@@ -507,7 +596,6 @@ class GlobalUniverseStore:
     def ingest_china_complete(self) -> int:
         from concurrent.futures import ThreadPoolExecutor
 
-        headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"}
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
 
         china_benchmarks = [
@@ -531,66 +619,140 @@ class GlobalUniverseStore:
         ]
         self._upsert_records(base_records)
 
-        tasks = [("hs_a", "stocks", p) for p in range(1, 25)] + [("hs_b", "stocks", p) for p in range(1, 4)] + [("etf_hq_fund", "etfs", p) for p in range(1, 6)]
-
-        def _fetch_sina_page(args: tuple[str, str, int]) -> List[dict]:
-            node, cat, page = args
-            out: List[dict] = []
+        def _em_num(v: object, default: float = 0.0) -> float:
+            if v is None or v == "-":
+                return default
             try:
-                url = (
-                    f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-                    f"Market_Center.getHQNodeData?page={page}&num=80&sort=amount&asc=0&node={node}"
-                )
-                r = httpx.get(url, headers=headers, timeout=8, follow_redirects=True)
-                if r.status_code != 200:
-                    return out
-                items = r.json()
-                if not isinstance(items, list):
-                    return out
-                for item in items:
-                    raw_sym = str(item.get("symbol") or "").lower()
-                    code = str(item.get("code") or "").strip()
-                    if not code:
-                        continue
-                    if raw_sym.startswith("sh"):
-                        suffix, exch = ".SS", "SSE"
-                    elif raw_sym.startswith("sz"):
-                        suffix, exch = ".SZ", "SZSE"
-                    else:
-                        continue
-                    try:
-                        lp = float(item.get("trade") or 0.0)
-                        pc = float(item.get("settlement") or lp)
-                        chg = float(item.get("pricechange") or (lp - pc))
-                        pct = float(item.get("changepercent") or 0.0)
-                        vol = int(float(item.get("volume") or 0))
-                    except (TypeError, ValueError):
-                        lp, pc, chg, pct, vol = 0.0, 0.0, 0.0, 0.0, 0
+                return float(v)
+            except (TypeError, ValueError):
+                return default
 
-                    out.append({
-                        "symbol": f"{code}{suffix}",
-                        "name": str(item.get("name") or code),
-                        "region": "CHINA",
-                        "exchange": exch,
-                        "category": cat,
-                        "currency": "CNY",
-                        "isin": "",
-                        "price": lp,
-                        "prev_close": pc,
-                        "change": round(chg, 3),
-                        "change_percent": round(pct, 2),
-                        "volume": vol,
-                        "rsi_14": 50.0,
-                        "as_of": now_str,
-                    })
-            except Exception:
-                pass
-            return out
+        em_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://quote.eastmoney.com/"}
+        em_tasks = (
+            [("m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23", "stocks", p) for p in range(1, 58)]
+            + [("b:MK0021,b:MK0022,b:MK0023,b:MK0024", "etfs", p) for p in range(1, 19)]
+            + [("m:1+s:2,m:0+t:5", "indices", p) for p in range(1, 4)]
+        )
 
-        records: List[dict] = []
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            for chunk in pool.map(_fetch_sina_page, tasks):
-                records.extend(chunk)
+        with httpx.Client(
+            headers=em_headers,
+            timeout=10.0,
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=16, max_keepalive_connections=16),
+        ) as em_client:
+            def _fetch_em_page(args: tuple[str, str, int]) -> List[dict]:
+                fs_code, cat, page = args
+                out: List[dict] = []
+                try:
+                    url = (
+                        f"https://push2.eastmoney.com/api/qt/clist/get?pn={page}&pz=100&po=1&np=1"
+                        f"&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs={fs_code}"
+                        f"&fields=f12,f13,f14,f2,f3,f4,f5,f18"
+                    )
+                    r = em_client.get(url)
+                    if r.status_code != 200:
+                        return out
+                    diff = ((r.json() or {}).get("data") or {}).get("diff") or []
+                    for item in diff:
+                        code = str(item.get("f12") or "").strip()
+                        mkt = item.get("f13")
+                        if not code:
+                            continue
+                        suffix = ".SS" if mkt == 1 else ".SZ"
+                        exch = "SSE" if mkt == 1 else "SZSE"
+                        lp = _em_num(item.get("f2"))
+                        pc = _em_num(item.get("f18"), lp)
+                        chg = _em_num(item.get("f4"), lp - pc)
+                        pct = _em_num(item.get("f3"))
+                        vol = int(_em_num(item.get("f5")))
+                        name = str(item.get("f14") or code)
+                        eff_cat = cat
+                        if cat == "etfs" and ("债" in name or "BOND" in name.upper()):
+                            eff_cat = "bonds"
+                        elif cat == "etfs" and ("金" in name or "GOLD" in name.upper() or "豆" in name or "能源" in name):
+                            eff_cat = "commodities"
+                        out.append({
+                            "symbol": f"{code}{suffix}",
+                            "name": name,
+                            "region": "CHINA",
+                            "exchange": exch,
+                            "category": eff_cat,
+                            "currency": "CNY",
+                            "isin": "",
+                            "price": lp,
+                            "prev_close": pc,
+                            "change": round(chg, 3),
+                            "change_percent": round(pct, 2),
+                            "volume": vol,
+                            "rsi_14": 50.0,
+                            "as_of": now_str,
+                        })
+                except Exception:
+                    pass
+                return out
+
+            records: List[dict] = []
+            with ThreadPoolExecutor(max_workers=10) as pool:
+                for chunk in pool.map(_fetch_em_page, em_tasks):
+                    records.extend(chunk)
+
+        if len(records) < 50:
+            sina_headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"}
+            sina_tasks = [("hs_a", "stocks", p) for p in range(1, 25)] + [("hs_b", "stocks", p) for p in range(1, 4)] + [("etf_hq_fund", "etfs", p) for p in range(1, 6)]
+
+            def _fetch_sina_page(args: tuple[str, str, int]) -> List[dict]:
+                node, cat, page = args
+                out: List[dict] = []
+                try:
+                    url = (
+                        f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+                        f"Market_Center.getHQNodeData?page={page}&num=80&sort=amount&asc=0&node={node}"
+                    )
+                    r = httpx.get(url, headers=sina_headers, timeout=8, follow_redirects=True)
+                    if r.status_code != 200:
+                        return out
+                    items = r.json()
+                    if not isinstance(items, list):
+                        return out
+                    for item in items:
+                        raw_sym = str(item.get("symbol") or "").lower()
+                        code = str(item.get("code") or "").strip()
+                        if not code:
+                            continue
+                        if raw_sym.startswith("sh"):
+                            suffix, exch = ".SS", "SSE"
+                        elif raw_sym.startswith("sz"):
+                            suffix, exch = ".SZ", "SZSE"
+                        else:
+                            continue
+                        lp = _em_num(item.get("trade"))
+                        pc = _em_num(item.get("settlement"), lp)
+                        chg = _em_num(item.get("pricechange"), lp - pc)
+                        pct = _em_num(item.get("changepercent"))
+                        vol = int(_em_num(item.get("volume")))
+                        out.append({
+                            "symbol": f"{code}{suffix}",
+                            "name": str(item.get("name") or code),
+                            "region": "CHINA",
+                            "exchange": exch,
+                            "category": cat,
+                            "currency": "CNY",
+                            "isin": "",
+                            "price": lp,
+                            "prev_close": pc,
+                            "change": round(chg, 3),
+                            "change_percent": round(pct, 2),
+                            "volume": vol,
+                            "rsi_14": 50.0,
+                            "as_of": now_str,
+                        })
+                except Exception:
+                    pass
+                return out
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                for chunk in pool.map(_fetch_sina_page, sina_tasks):
+                    records.extend(chunk)
 
         self._upsert_records(records)
         return len(base_records) + len(records)
@@ -658,13 +820,12 @@ class GlobalUniverseStore:
                     # Find header row starting with Product Status;
                     hdr_idx = next((i for i, l in enumerate(lines[:15]) if l.startswith("Product Status;")), 2)
                     reader = csv.DictReader(io.StringIO("\n".join(lines[hdr_idx:])), delimiter=";")
-                    count_xetr = 0
                     for row in reader:
                         mnem = (row.get("Mnemonic") or "").strip()
                         name = (row.get("Instrument") or "").strip()
                         inst_type = (row.get("Instrument Type") or "").upper()
                         curr = (row.get("Currency") or "EUR").strip()
-                        if not mnem or count_xetr >= 3500:
+                        if not mnem:
                             continue
                         cat = "etfs" if "ETF" in inst_type or "ETP" in inst_type else "stocks"
                         records.append({
@@ -677,9 +838,79 @@ class GlobalUniverseStore:
                             "isin": (row.get("ISIN") or "").strip(),
                             "price": 0.0, "prev_close": 0.0, "change": 0.0, "change_percent": 0.0, "volume": 0, "rsi_14": 50.0, "as_of": "",
                         })
-                        count_xetr += 1
             except Exception as e:
                 print("XETRA CSV err:", e)
+
+            # 3. Dynamic UK LSE FTSE 100 & FTSE 250 Constituents
+            class _WikiTableParser(HTMLParser):
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.in_table = False
+                    self.in_row = False
+                    self.in_cell = False
+                    self.tables: list[list[list[str]]] = []
+                    self.cur_table: list[list[str]] = []
+                    self.cur_row: list[str] = []
+                    self.cur_cell: list[str] = []
+
+                def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+                    if tag == "table" and any(k == "class" and v and "wikitable" in v for k, v in attrs):
+                        self.in_table = True
+                        self.cur_table = []
+                    elif self.in_table and tag == "tr":
+                        self.in_row = True
+                        self.cur_row = []
+                    elif self.in_row and tag in ("td", "th"):
+                        self.in_cell = True
+                        self.cur_cell = []
+
+                def handle_endtag(self, tag: str) -> None:
+                    if self.in_cell and tag in ("td", "th"):
+                        self.cur_row.append("".join(self.cur_cell).strip())
+                        self.in_cell = False
+                    elif self.in_row and tag == "tr":
+                        if self.cur_row:
+                            self.cur_table.append(self.cur_row)
+                        self.in_row = False
+                    elif self.in_table and tag == "table":
+                        self.tables.append(self.cur_table)
+                        self.in_table = False
+
+                def handle_data(self, data: str) -> None:
+                    if self.in_cell:
+                        self.cur_cell.append(data)
+
+            for wiki_url in ("https://en.wikipedia.org/wiki/FTSE_100_Index", "https://en.wikipedia.org/wiki/FTSE_250_Index"):
+                try:
+                    rw = client.get(wiki_url)
+                    if rw.status_code == 200:
+                        parser = _WikiTableParser()
+                        parser.feed(rw.text)
+                        for tbl in parser.tables:
+                            if not tbl:
+                                continue
+                            hdr = [h.lower() for h in tbl[0]]
+                            tick_i = next((i for i, h in enumerate(hdr) if "ticker" in h or "epic" in h), None)
+                            comp_i = next((i for i, h in enumerate(hdr) if "company" in h or "constituent" in h), 0)
+                            if tick_i is None:
+                                continue
+                            for rrow in tbl[1:]:
+                                if len(rrow) > max(tick_i, comp_i):
+                                    tkr = rrow[tick_i].strip().rstrip(".").upper()
+                                    cname = rrow[comp_i].strip() or tkr
+                                    if tkr and len(tkr) <= 8 and tkr.isalnum():
+                                        records.append({
+                                            "symbol": f"{tkr}.L",
+                                            "name": f"{cname} (LSE)",
+                                            "region": "EU",
+                                            "exchange": "LSE",
+                                            "category": "stocks",
+                                            "currency": "GBp",
+                                            "isin": "",
+                                            "price": 0.0, "prev_close": 0.0, "change": 0.0, "change_percent": 0.0, "volume": 0, "rsi_14": 50.0, "as_of": "",
+                                        })
+                except Exception as e:
+                    print("UK FTSE wiki err:", e)
 
         eu_benchmarks = [
             {"symbol": "^GDAXI", "name": "DAX Performance Index", "exchange": "XETRA", "category": "indices", "currency": "EUR"},
@@ -709,15 +940,48 @@ class GlobalUniverseStore:
     def ingest_all_regions_parallel(self) -> Dict[str, int]:
         results: Dict[str, int] = {}
         threads = [
-            threading.Thread(target=lambda: results.update({"IND": self.ingest_india_nse_bse()})),
-            threading.Thread(target=lambda: results.update({"USA": self.ingest_usa_complete()})),
-            threading.Thread(target=lambda: results.update({"CANADA": self.ingest_canada_complete()})),
-            threading.Thread(target=lambda: results.update({"CHINA": self.ingest_china_complete()})),
-            threading.Thread(target=lambda: results.update({"EU": self.ingest_eu_complete()})),
+            threading.Thread(target=lambda: results.update({"IND": self.ingest_india_nse_bse()}), daemon=True),
+            threading.Thread(target=lambda: results.update({"USA": self.ingest_usa_complete()}), daemon=True),
+            threading.Thread(target=lambda: results.update({"CANADA": self.ingest_canada_complete()}), daemon=True),
+            threading.Thread(target=lambda: results.update({"CHINA": self.ingest_china_complete()}), daemon=True),
+            threading.Thread(target=lambda: results.update({"EU": self.ingest_eu_complete()}), daemon=True),
         ]
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=20)
+            t.join(timeout=45)
         self.last_ingested_at = datetime.now(timezone.utc).isoformat()
         return results
+
+    def export_cache_snapshot(self, cache_path: str) -> int:
+        with self._lock:
+            if not self._by_symbol:
+                return 0
+            payload = {
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "stats": dict(self.stats),
+                "records": list(self._by_symbol.values()),
+            }
+        tmp_path = f"{cache_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, separators=(",", ":"))
+        os.replace(tmp_path, cache_path)
+        return len(payload["records"])
+
+    def load_cache_snapshot(self, cache_path: str) -> int:
+        if not os.path.exists(cache_path):
+            return 0
+        try:
+            with open(cache_path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            records = payload.get("records") or []
+            if not isinstance(records, list) or not records:
+                return 0
+            with self._lock:
+                self._upsert_records(records)
+                if isinstance(payload.get("stats"), dict):
+                    self.stats.update(payload["stats"])
+                self.last_ingested_at = payload.get("saved_at")
+            return len(records)
+        except Exception:
+            return 0

@@ -47,6 +47,14 @@ export function formatAssetPrice(val: number | undefined | null, currency: strin
   return `${getCurrencySymbol(currency)}${formatted}`;
 }
 
+export function formatMoney(val: number | undefined | null, currency: string | undefined): string {
+  if (val === undefined || val === null || isNaN(val)) return "--";
+  const formatted = formatNumber(val, 2, 2);
+  if (currency === "PERCENT") return `${formatted}%`;
+  if (currency === "GBp") return `${formatted}p`;
+  return `${getCurrencySymbol(currency)}${formatted}`;
+}
+
 export function formatCompactCurrency(val: number | undefined | null, currency: string = "USD"): string {
   if (val === undefined || val === null || isNaN(val)) return "--";
   const sym = getCurrencySymbol(currency);

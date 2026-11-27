@@ -15,6 +15,7 @@ import {
   HistogramSeries,
   ISeriesApi,
   IChartApi,
+  IPriceLine,
   SeriesType,
   Time,
   ISeriesMarkersPluginApi,
@@ -43,6 +44,7 @@ import {
 import { dedupeAscByTime, formatAssetPrice, formatCompactCurrency, formatNumber } from "@/lib/format";
 import { apiUrl, authFetch } from "@/lib/api";
 import { useTheme } from "@/components/ThemeProvider";
+import { Position } from "@/types/trading";
 
 export interface CandleData {
   time: string | number;
@@ -106,6 +108,7 @@ interface TradingViewChartProps {
   onCloseIndicators: () => void;
   onCatalogLoaded?: (count: number) => void;
   refreshNonce?: number;
+  openPositions?: Position[];
   onQuickOrder?: (side: "BUY" | "SELL") => void;
   onOpenOverview?: () => void;
 }
@@ -153,6 +156,7 @@ export default function TradingViewChart({
   onCloseIndicators,
   onCatalogLoaded,
   refreshNonce = 0,
+  openPositions = [],
   onQuickOrder,
   onOpenOverview,
 }: TradingViewChartProps) {
@@ -162,6 +166,7 @@ export default function TradingViewChart({
   const overlayLineRef = useRef<ISeriesApi<"Line"> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const positionLinesRef = useRef<IPriceLine[]>([]);
   const initialPriceRef = useRef<number>(currentPrice);
   useEffect(() => {
     initialPriceRef.current = currentPrice;
@@ -207,8 +212,10 @@ export default function TradingViewChart({
 
   const [loadedChart, setLoadedChart] = useState<{
     symbol: string;
+    requestKey: string;
     candles: CandleData[];
-  }>({ symbol: "", candles: [] });
+  }>({ symbol: "", requestKey: "", candles: [] });
+  const currentRequestKey = `${symbol}|${timeframe}|${rangePreset}|${chartStyle}|${refreshNonce}`;
 
   useEffect(() => {
     const updateClock = () => setUtcClock(new Date().toISOString().slice(11, 19) + " UTC");
@@ -377,6 +384,7 @@ export default function TradingViewChart({
     ]);
     const apiStyle = derivedApiStyles.has(chartStyle) ? chartStyle : "candles";
 
+    const reqKey = `${symbol}|${timeframe}|${rangePreset}|${chartStyle}|${refreshNonce}`;
     fetch(
       apiUrl(`/api/history/${encodeURIComponent(symbol)}?interval=${interval}&period=${period}&style=${apiStyle}`),
       { signal: controller.signal }
@@ -388,11 +396,11 @@ export default function TradingViewChart({
           if (!controller.signal.aborted) {
             setErrorMsg(null);
             setHoverOhlc(null);
-            setLoadedChart({ symbol, candles: data || [] });
+            setLoadedChart({ symbol, requestKey: reqKey, candles: data || [] });
           }
         } else if (!controller.signal.aborted) {
           setErrorMsg("Historical data unavailable for selected range/ticker.");
-          setLoadedChart({ symbol, candles: [] });
+          setLoadedChart({ symbol, requestKey: reqKey, candles: [] });
         }
       })
       .catch((err: unknown) => {
@@ -603,6 +611,7 @@ export default function TradingViewChart({
 
     return () => {
       resizeObserver.disconnect();
+      positionLinesRef.current = [];
       chart.remove();
       chartRef.current = null;
       mainSeriesRef.current = null;
@@ -611,6 +620,64 @@ export default function TradingViewChart({
       markersPluginRef.current = null;
     };
   }, [chartStyle]);
+
+  useEffect(() => {
+    const series = mainSeriesRef.current;
+    if (!series) return;
+    for (const line of positionLinesRef.current) {
+      try {
+        series.removePriceLine(line);
+      } catch {
+        // ignore if series recreated
+      }
+    }
+    positionLinesRef.current = [];
+    if (loadedChart.symbol !== symbol || loadedChart.candles.length === 0) return;
+
+    const matching = openPositions.filter((p) => p.symbol === symbol);
+    for (const pos of matching) {
+      try {
+        if (pos.avg_price > 0) {
+          positionLinesRef.current.push(
+            series.createPriceLine({
+              price: pos.avg_price,
+              color: pos.order_type === "SHORT" ? "#F59E0B" : "#2962FF",
+              lineWidth: 1,
+              lineStyle: LineStyle.Solid,
+              axisLabelVisible: true,
+              title: `${pos.order_type} ${pos.quantity} Avg`,
+            })
+          );
+        }
+        if (pos.stop_loss && pos.stop_loss > 0) {
+          positionLinesRef.current.push(
+            series.createPriceLine({
+              price: pos.stop_loss,
+              color: "#F23645",
+              lineWidth: 1,
+              lineStyle: LineStyle.Dashed,
+              axisLabelVisible: true,
+              title: "SL",
+            })
+          );
+        }
+        if (pos.take_profit && pos.take_profit > 0) {
+          positionLinesRef.current.push(
+            series.createPriceLine({
+              price: pos.take_profit,
+              color: "#089981",
+              lineWidth: 1,
+              lineStyle: LineStyle.Dashed,
+              axisLabelVisible: true,
+              title: "TP",
+            })
+          );
+        }
+      } catch {
+        // ignore custom series plugins without price lines
+      }
+    }
+  }, [symbol, loadedChart, openPositions, chartStyle]);
 
   useEffect(() => {
     chartRef.current?.priceScale("right").applyOptions({
@@ -662,21 +729,29 @@ export default function TradingViewChart({
       }))
     );
 
-    if (markersPluginRef.current && events.length > 0 && typeof bars[0].time === "string") {
-      const candleTimes = new Set(bars.map((b) => String(b.time)));
-      const matched = events
-        .filter((ev) => candleTimes.has(ev.time))
-        .map((ev) => ({
-          time: ev.time as Time,
-          position: "belowBar" as const,
-          color: ev.type === "E" ? "#2962FF" : ev.type === "D" ? "#089981" : "#F59E0B",
-          shape: "circle" as const,
-          text: ev.type,
-        }));
-      try {
-        markersPluginRef.current.setMarkers(matched);
-      } catch {
-        // ignore if non-daily
+    if (markersPluginRef.current) {
+      if (events.length > 0 && typeof bars[0].time === "string") {
+        const candleTimes = new Set(bars.map((b) => String(b.time)));
+        const matched = events
+          .filter((ev) => candleTimes.has(ev.time))
+          .map((ev) => ({
+            time: ev.time as Time,
+            position: "belowBar" as const,
+            color: ev.type === "E" ? "#2962FF" : ev.type === "D" ? "#089981" : "#F59E0B",
+            shape: "circle" as const,
+            text: ev.type,
+          }));
+        try {
+          markersPluginRef.current.setMarkers(matched);
+        } catch {
+          // ignore if non-daily
+        }
+      } else {
+        try {
+          markersPluginRef.current.setMarkers([]);
+        } catch {
+          // ignore
+        }
       }
     }
 
@@ -999,7 +1074,7 @@ export default function TradingViewChart({
             </div>
           </div>
 
-          {(loading || (loadedChart.symbol !== symbol && !errorMsg)) && (
+          {(loading || (loadedChart.requestKey !== currentRequestKey && !errorMsg)) && (
             <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#FFFFFF]/80 backdrop-blur-[1px]">
               <div className="flex flex-col items-center gap-2">
                 <RefreshCw className="w-6 h-6 text-[#2962FF] animate-spin" />

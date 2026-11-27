@@ -2,11 +2,12 @@
 
 import React from "react";
 import { ChevronUp, ChevronDown, Maximize2, Minimize2, Terminal, Filter, Layers, PlayCircle } from "lucide-react";
-import PositionsTable, { Position, PendingOrder, OrderHistoryItem } from "@/components/PositionsTable";
+import PositionsTable from "@/components/PositionsTable";
 import ScreenerPanel from "@/components/ScreenerPanel";
 import OrderFlowSuite from "@/components/OrderFlowSuite";
 import BarReplayPanel from "@/components/BarReplayPanel";
 import { formatNumber, getCurrencySymbol } from "@/lib/format";
+import { OrderHistoryItem, PendingOrder, Position } from "@/types/trading";
 
 export type BottomDrawerTab = "paper" | "screener" | "orderflow" | "replay";
 
@@ -23,8 +24,10 @@ interface BottomTerminalDrawerProps {
   positions: Position[];
   pendingOrders: PendingOrder[];
   ordersHistory: OrderHistoryItem[];
-  onClosePosition: (symbol: string, quantity: number, orderType: string) => void;
+  rejectedOrders?: OrderHistoryItem[];
+  onClosePosition: (symbol: string, quantity: number, orderType: string, productType?: string) => void;
   onCancelPending: (orderId: string) => void;
+  onSquareOffAll?: () => void;
   onSelectSymbolFromScreener: (symbol: string) => void;
 }
 
@@ -41,19 +44,28 @@ export default function BottomTerminalDrawer({
   positions,
   pendingOrders,
   ordersHistory,
+  rejectedOrders = [],
   onClosePosition,
   onCancelPending,
+  onSquareOffAll,
   onSelectSymbolFromScreener,
 }: BottomTerminalDrawerProps) {
   const currencyPositions = positions.filter(
     (p) => p.currency === activeCurrency || (activeCurrency === "GBP" && p.currency === "GBp")
   );
-  const totalUnrealizedPnl = currencyPositions.reduce((acc, p) => acc + (p.pnl || 0), 0);
+
+  // Convert GBp (pence) -> GBP (pounds) accurately when activeCurrency is GBP
+  const scaleFor = (posCurrency: string) => (activeCurrency === "GBP" && posCurrency === "GBp" ? 0.01 : 1);
+
+  const totalUnrealizedPnl = currencyPositions.reduce(
+    (acc, p) => acc + (p.pnl || 0) * scaleFor(p.currency),
+    0
+  );
   const openPositionEquity = currencyPositions.reduce((acc, p) => {
-    if (p.order_type === "SHORT") {
-      return acc + p.avg_price * p.quantity + (p.pnl || 0);
-    }
-    return acc + p.current_price * p.quantity;
+    const sc = scaleFor(p.currency);
+    const mb = (p.margin_blocked ?? p.avg_price * p.quantity / (p.leverage || 1)) * sc;
+    const pnl = (p.pnl || 0) * sc;
+    return acc + mb + pnl;
   }, 0);
   const currSym = getCurrencySymbol(activeCurrency);
   const equity = walletBalance + openPositionEquity;
@@ -101,25 +113,28 @@ export default function BottomTerminalDrawer({
         </div>
 
         {/* Account Summary Metrics + Collapse/Expand Controls */}
-        <div className="flex items-center gap-4 text-[11px] shrink-0">
-          <div className="hidden md:flex items-center gap-3 font-mono tabular-nums">
+        <div className="flex items-center gap-3 text-[11px] shrink-0">
+          <div className="hidden xl:flex items-center gap-3 font-mono tabular-nums">
             <span className="text-[#787B86]">
-              Balance:{" "}
+              Balance ({activeCurrency}):{" "}
               <strong suppressHydrationWarning className="text-[#131722]">
-                {currSym}{formatNumber(walletBalance, 2)}
+                {currSym}
+                {formatNumber(walletBalance, 2)}
               </strong>
             </span>
             <span className="text-[#787B86]">
               Equity:{" "}
               <strong suppressHydrationWarning className="text-[#131722]">
-                {currSym}{formatNumber(equity, 2)}
+                {currSym}
+                {formatNumber(equity, 2)}
               </strong>
             </span>
             <span className="text-[#787B86]">
-              Open P&L:{" "}
+              Open P&amp;L:{" "}
               <strong className={totalUnrealizedPnl >= 0 ? "text-[#089981]" : "text-[#F23645]"}>
                 {totalUnrealizedPnl >= 0 ? "+" : "-"}
-                {currSym}{formatNumber(Math.abs(totalUnrealizedPnl), 2)}
+                {currSym}
+                {formatNumber(Math.abs(totalUnrealizedPnl), 2)}
               </strong>
             </span>
           </div>
@@ -157,8 +172,10 @@ export default function BottomTerminalDrawer({
               positions={positions}
               pendingOrders={pendingOrders}
               ordersHistory={ordersHistory}
+              rejectedOrders={rejectedOrders}
               onClosePosition={onClosePosition}
               onCancelPending={onCancelPending}
+              onSquareOffAll={onSquareOffAll}
             />
           )}
           {activeTab === "screener" && (
