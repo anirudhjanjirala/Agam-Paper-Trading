@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 Agam Paper Trading Contributors
+Copyright (c) 2026 Anirudh Janjirala & Agam Paper Trading Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +19,15 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+### Open Source Freedom & Community Contribution Grant
+
+Agam Paper Trading is proud to be **100% Free & Open-Source Software (FOSS)**. 
+
+Under this license, you are explicitly encouraged and free to:
+1. **Use**: Run and deploy the application locally, within educational institutions, or in personal development environments without paying any royalties or subscription fees.
+2. **Modify**: Adapt, improve, refactor, and customize the source code, user interface, charting algorithms, or backend tax engines to meet your needs.
+3. **Contribute**: Submit pull requests, report issues, suggest new market feeds, build indicators, and help improve the trading workstation for everyone.
+4. **Distribute**: Share and redistribute the software or your derivative works, provided that the original copyright and permission notice are preserved.
