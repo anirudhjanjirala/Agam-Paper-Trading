@@ -1,233 +1,271 @@
 <p align="center">
-  <img src="frontend/public/agam-logo.svg" alt="Agam Paper Trading Logo" width="72" height="72" />
+  <img src="frontend/public/agam-logo.svg" alt="Agam Paper Trading Logo" width="80" height="80" />
 </p>
 
 <h1 align="center">Agam Paper Trading Platform</h1>
 
 <p align="center">
-  <strong>100% Free &amp; Open-Source Local PC Institutional Paper Trading Terminal, 10-Style Superchart &amp; Live Country Tax Engine</strong>
+  <strong>100% Free &amp; Open-Source Local PC Institutional Paper Trading Terminal, 10-Style Superchart, Multi-Profile Vault &amp; Live Asset-Class Tax Engine</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/Frontend-Next.js%2016%20%7C%20React%2019%20%7C%20Tailwind%20v4-131722" alt="Next.js 16" />
   <img src="https://img.shields.io/badge/Backend-FastAPI%20%7C%20SQLAlchemy%20%7C%20Polars-089981" alt="FastAPI" />
-  <img src="https://img.shields.io/badge/Charts-10%20Types%20%7C%20Per--Symbol%20Drawings-2962FF" alt="10 Chart Styles" />
-  <img src="https://img.shields.io/badge/Data-Zero%20Paid%20APIs-F59E0B" alt="Zero Cost Market Feeds" />
-  <a href="docs/PROJECT_REPORT.md">
-    <img src="https://img.shields.io/badge/Audit%20Report-Passed%20(4.5%2F5)-00C853" alt="Inspection Report" />
-  </a>
+  <img src="https://img.shields.io/badge/Universe-39%2C700%2B%20Global%20Assets-purple" alt="39.7k Instruments" />
+  <img src="https://img.shields.io/badge/Charts-10%20Types%20%7C%20Lightweight%20Charts%20v5-2962FF" alt="10 Chart Styles" />
+  <img src="https://img.shields.io/badge/Taxes-Live%20Statutory%20%26%20CTT%2FSTT-F59E0B" alt="Live Taxes" />
   <a href="mailto:anirudhjanjirala@gmail.com">
     <img src="https://img.shields.io/badge/Contact-anirudhjanjirala%40gmail.com-EA4335" alt="Contact Email" />
   </a>
 </p>
 
 <p align="center">
-  <strong>Contact Maintainer (Anirudh Janjirala):</strong> <a href="mailto:anirudhjanjirala@gmail.com">anirudhjanjirala@gmail.com</a> &nbsp;|&nbsp; <a href="https://github.com/anirudhjanjirala/Agam-Paper-Trading">GitHub Repository</a> &nbsp;|&nbsp; <a href="docs/PROJECT_REPORT.md"><strong>Full Inspection Report</strong></a>
+  <strong>Maintainer:</strong> Anirudh Janjirala (<a href="mailto:anirudhjanjirala@gmail.com">anirudhjanjirala@gmail.com</a>) &nbsp;|&nbsp;
+  <strong>Repository:</strong> <a href="https://github.com/anirudhjanjirala/Agam-Paper-Trading">GitHub</a> &nbsp;|&nbsp;
+  <strong>License:</strong> MIT Open Source
 </p>
 
 ---
 
-## Project Description
+## 🌟 Quick Overview: What is Agam?
 
-**Agam Paper Trading Platform** is a full-stack, multi-tenant institutional charting workstation and virtual paper-trading simulator built with **Next.js 16 / React 19 / Lightweight Charts v5** and **FastAPI / SQLAlchemy / Polars**.
+**Agam Paper Trading Platform** is an institutional-grade, zero-cost paper trading workstation built for traders, quantitative learners, and enthusiasts. It runs entirely on your local PC with zero paid external API dependencies. 
 
-It brings together:
-- **Zero-cost global market coverage** across **5 regions** (`IND`, `USA`, `CANADA`, `CHINA`, `EU`) with **24,000+ equities, ETFs, indices, futures, FX, and bonds**, powered by asynchronous Google Finance pipelines, public exchange feeds (`period1=0` full listing history), and Google News RSS.
-- **Full listing-start historical charts (`ALL` / `max`)**: Load decades of daily/weekly/monthly candles from a company's early listing dates (e.g., `AAPL` from `1980-12-12` — `11,582` daily bars; `RELIANCE.NS` from `1996-01-01` — `7,751` daily bars; `SHOP.TO` from `2015-05-21` — `2,891` daily bars).
-- **All 10 TradingView-Grade Chart Types** (plus Baseline): Candlestick, OHLC Bar, Line, Area, Heikin-Ashi, Renko, **Point & Figure (`X` / `O`)**, **Kagi (`Yang` / `Yin`)**, **Three Line Break**, and **Range Bar** charts.
-- **Per-Symbol Isolated Line Drawings & `1px`–`4px` Line Weights**: Draw Trend Lines, Horizontal Rays, Parallel Channels, Fibonacci Retracements, and Long/Short Position Rulers with selectable `1px`–`4px` stroke thickness. Drawings are isolated per user and per ticker (`chart:<symbol>`) so annotations never bleed across stocks.
-- **Local PC Multi-Profile Vault & Fixed Capital Discipline**: Multi-profile account system on a single PC supporting Sign Up (add traders anytime), password-verified profile switching, and password-verified profile removal, plus non-resettable fixed multi-currency capital (`INR`, `USD`, `CAD`, `CNY`, `EUR`, `GBP`) with progressive low-capital warnings (`<30%`, `<15%`, `<5%`), persistent SQLite WAL activity/audit trail, asset-class & country-specific statutory taxes & brokerage (`IND`, `USA`, `CANADA`, `CHINA`, `EU` across Stocks, ETFs, Commodities/Futures, Forex, Bonds), auto-refreshed global markets, and risk-based position sizer.
-- **Notice / Disclaimer**: Educational simulation only — no real funds, exchange routing, or financial advice. Read in-app Risk & Regulatory Disclaimers before trading.
-- **Dual-Theme & Responsive UI**: Zero-flicker Light (`#FFFFFF`) and Dark (`#0B0E14`) themes with SSR-safe hydration (`useSyncExternalStore`) and mobile (`390×844`) overlay drawers.
+Unlike conventional mock trading websites that reset without consequences, Agam introduces **strict trading psychology discipline**:
+- **Fixed, non-resettable capital** per profile (no easy "Reset to \$100k" button when you lose money).
+- **Progressive risk and drawdown warnings** (`<30%`, `<15%`, `<5%`).
+- **Real-world statutory taxes & brokerage** tailored to each country and asset class (STT, Stamp Duty, CTT, SEC, FINRA, SDRT, FTT, TOB).
+- **Multi-Profile Vault** on one PC: multiple traders, friends, or family members can have their own isolated accounts, currency wallets, and audit trails on the same machine.
+- **Global 39,700+ instruments** across India, USA, Canada, China, and Europe with zero lag.
 
 ---
 
-## Screenshots Gallery
+## 📸 Visual Showcase & Screenshots
 
-### 1. Edge-to-Edge Superchart Terminal (Light Mode)
-Full-viewport charting workstation with `52px` (`42px` mobile) drawing dock, `1px`–`4px` line weights, inline `SELL | Spread | BUY` execution chips, 55+ chained indicators, live WebSocket quotes, multi-region Watchlist, and collapsible Paper Trading / Screener / Order Flow / Bar Replay drawer.
+### 1. Multi-Profile PC Vault (Switch, Add, or Remove Traders)
+Manage multiple separate trader vaults on the same computer. Switch between accounts seamlessly or add new traders anytime without deleting previous data. All deletions are protected by password verification.
 
-![Agam Superchart Terminal](docs/screenshots/superchart.png)
+![Multi-Profile Vault Switcher](docs/screenshots/multi-profile-switcher.png)
 
-### 2. Official Dark Theme (`#0B0E14`)
-Instant zero-flicker switch between Official Light and `#0B0E14` Dark themes synced across Tailwind styles, charts, and user account preferences.
+---
 
-![Agam Dark Theme Terminal](docs/screenshots/dark-theme.png)
+### 2. Edge-to-Edge Superchart & FrontPage Terminal
+Full-screen institutional trading terminal equipped with real-time watchlist, instant order execution drawer, portfolio metrics, live orders, and 55+ technical indicators.
 
-### 3. Symbol-Isolated Drawings & `1px`–`4px` Line Weights
-Annotations (`Trend Line`, `Horizontal Ray`, `Fib`, `Parallel Channel`, `R:R`) support `1px`–`4px` line weights and stay strictly scoped to each ticker (`RELIANCE.NS` vs `INFY.NS` / `AAPL`).
+![FrontPage Terminal Overview](docs/screenshots/frontpage-terminal-overview.png)
 
-![Symbol-Isolated Drawings with Line Weights](docs/screenshots/drawings-line-weights.png)
+---
 
-### 4. Listing-Start Historical Data (`ALL` / `max`)
-Default `ALL` mode fetches full daily/monthly exchange history from the stock's listing start (e.g., `AAPL` back to `1980`–`1985`, `RELIANCE.NS` back to `1996`).
+### 3. Live Statutory Tax & Brokerage Center (Asset-Class Aware)
+Inspect exact estimated taxes, brokerages, exchange fees, and statutory levies in real time before placing a trade. Supports **Stocks, ETFs, Commodities, Forex, and Bonds** across IND, USA, Canada, China, and EU.
 
-![AAPL Historical Chart From Listing Start](docs/screenshots/full-history-1985.png)
+![Tax & Charges Calculator](docs/screenshots/tax-and-charges-calculator.png)
 
-### 5. Point & Figure (`X` / `O`) & Kagi (`Yang` / `Yin`) Chart Engines
-Custom Lightweight Charts v5 canvas plugins render native zooming/panning Point & Figure `X`/`O` columns and Kagi thick green Yang / thin red Yin stepped lines alongside OHLC Bar, Candlestick, Heikin-Ashi, Renko, Line Break, Range Bar, Line, and Area charts.
+---
 
-| Point & Figure (`X` / `O`) | Kagi (`Yang` / `Yin`) |
+### 4. Interactive Order Execution Drawer
+Execute `DELIVERY` (1x Cash) or `INTRADAY` (up to 5x margin) trades with real-time fee previews, automatic Stop-Loss, Take-Profit, and Trailing Stop automation.
+
+![Order Execution Drawer](docs/screenshots/order-execution-drawer.png)
+
+---
+
+### 5. Secure First-Time Vault Registration & Disclaimer
+Clean, beginner-friendly onboarding with instant starting capital allotment in your chosen base currency and regulatory risk disclaimers.
+
+![Vault Registration](docs/screenshots/vault-registration.png)
+
+---
+
+### 6. Dual Theme Support: Official Light & `#0B0E14` Dark Mode
+Instant zero-flicker toggle between clean institutional light mode and deep `#0B0E14` dark theme.
+
+| Dark Theme (`#0B0E14`) | Edge-to-Edge Superchart |
 | :---: | :---: |
-| ![Point and Figure Chart](docs/screenshots/point-and-figure.png) | ![Kagi Chart](docs/screenshots/kagi-chart.png) |
+| ![Dark Theme](docs/screenshots/dark-theme.png) | ![Superchart](docs/screenshots/superchart.png) |
 
-### 6. Mobile Responsive Terminal (`390×844`)
-On narrow screens, the watchlist opens as an overlay drawer while the Superchart canvas and scrollable top toolbar remain unobstructed with zero horizontal overflow.
+---
 
-![Mobile Responsive Terminal](docs/screenshots/mobile-responsive.png)
+### 7. All 10 TradingView-Grade Chart Types
+Built on custom Lightweight Charts v5 canvas renderers supporting exotic brick and column representations:
 
-### 7. Symbol Overview, Fundamentals, 16-Chart Workspace & Live IPOs
-
-| Symbol Overview & Financials | 16-Chart Sync Workspace | Live & Upcoming IPOs |
+| Point & Figure (`X` / `O`) | Kagi (`Yang` / `Yin`) | Drawings & Line Weights |
 | :---: | :---: | :---: |
-| ![Agam Symbol Overview](docs/screenshots/overview.png) | ![Agam 16-Chart Sync Canvas](docs/screenshots/multichart.png) | ![Live IPOs Calendar](docs/screenshots/ipos-calendar.png) |
+| ![Point & Figure](docs/screenshots/point-and-figure.png) | ![Kagi Chart](docs/screenshots/kagi-chart.png) | ![Drawings](docs/screenshots/drawings-line-weights.png) |
 
 ---
 
-## Key Features & Supported Chart Types
+## ⚡ Core Features & Highlights
 
-### Supported Chart Types (`10 Requested + Baseline`)
-| Value | Label | Renderer / Calculation |
-| :--- | :--- | :--- |
-| `candles` | Candlestick Chart | Lightweight Charts `CandlestickSeries` |
-| `bar` | Bar Chart (OHLC) | Lightweight Charts `BarSeries` |
-| `line` | Line Chart | Lightweight Charts `LineSeries` |
-| `area` | Area Chart | Lightweight Charts `AreaSeries` |
-| `heikin_ashi` | Heikin-Ashi Chart | Smoothed HA OHLC bars via `/api/history` |
-| `renko` | Renko Chart | Fixed brick reversal bars with unique ascending timestamps |
-| `point_and_figure` | Point & Figure Chart | Custom canvas plugin (`X` rising / `O` falling box columns) |
-| `kagi` | Kagi Chart | Custom canvas plugin (thick `#089981` Yang / thin `#F23645` Yin reversals) |
-| `line_break` | Line Break Chart | 3-Line Break reversal blocks (`_to_line_break`) |
-| `range_bar` | Range Bar Chart | Fixed high-low range bars (`_to_range_bars`) |
-| `baseline` | Baseline Chart | Lightweight Charts `BaselineSeries` |
+### 1. 🛡️ Multi-Profile Local PC Vault
+- **Multi-Trader Architecture**: Perfect for personal computers used by multiple traders.
+- **Isolated Wallets**: Each user has an independent balance, open positions, order book, and activity log.
+- **Account Protection**: Switching profiles or removing an account requires password verification.
+- **Capital Discipline**: Starting balance is non-resettable. Low-margin warnings trigger when funds drop below 30%, 15%, and 5%.
 
-### Platform Capabilities
-- **5 Global Markets**: India (`NSE`/`BSE`), USA (`NASDAQ`/`NYSE`/`AMEX`), Canada (`TSX`/`TSXV`), China (`SSE`/`SZSE`), and Europe/UK (`LSE`/`XETRA`/`Euronext`).
-- **Multi-Tenant Paper Trading**: Isolated per-user wallets (`INR`, `USD`, `CAD`, `CNY`, `EUR`, `GBP`), Market/Limit/Stop orders, Stop-Loss / Take-Profit automation, long partial-sell `realized_pnl` tracking, and CSV trade/history export.
-- **Quant & Screening**: 55+ technical indicators, chained calculations (e.g., `EMA(9) of RSI(14)`), Order Flow (Volume Profile `POC`/`VAH`/`VAL`, TPO Market Profile, Footprint), isolated Bar Replay studio, Polars full-market Screener, and live FRED Macro data.
+### 2. 🏛️ Real-World Live Tax & Regulatory Cost Engine
+Accurately models actual statutory deductions so your paper trading results match real-world net profits:
+- **India (IND)**: 
+  - Stocks: STT (0.1% delivery, 0.025% intraday sell), Stamp Duty (0.015% buy), SEBI turnover fee, GST (18% on brokerage).
+  - Commodities (MCX): CTT (0.01% on non-agri futures), Stamp Duty (0.003%), Commodity transaction charges.
+  - ETFs & Bonds: Exempted from commodity CTT.
+- **United States (USA)**:
+  - SEC Section 31 transaction fee ($0.0000278 on sells), FINRA Trading Activity Fee (TAF, $0.000166/share), standard zero-commission paper models.
+- **United Kingdom & Europe (EU)**:
+  - UK LSE (`.L`): 0.5% Stamp Duty Reserve Tax (SDRT) on buys.
+  - France Euronext (`.PA`): 0.4% Financial Transaction Tax (FTT).
+  - Italy Borsa Italiana (`.MI`): 0.1% Tobin Tax.
+  - Belgium Euronext (`.BR`): 0.35% Tax on Stock Exchange Transactions (TOB).
+  - Germany XETRA (`.DE`): 0% statutory FTT.
+- **China (SSE/SZSE)**:
+  - 0.05% Ministry of Finance Stamp Tax on stock sales (0% on ETFs).
+
+### 3. 🌐 Global 39,700+ Instrument Universe
+Instant warm-boot universe loader powered by asynchronous multi-exchange pipelines (<50ms query latency):
+- **India**: 8,900+ NSE & BSE equities, indices, and MCX commodities.
+- **USA**: 12,900+ NASDAQ, NYSE, AMEX, ETFs, and major FX pairs.
+- **Canada**: 3,700+ TSX & TSXV equities.
+- **China**: 7,500+ Shanghai & Shenzhen equities and indices.
+- **Europe & UK**: 6,400+ London, Frankfurt, Euronext Paris, Milan, and Brussels instruments.
+
+### 4. 📈 10 Advanced Charting Styles
+1. **Candlestick**: Standard Japanese candles with precise wick and body representation.
+2. **OHLC Bar**: Western open-high-low-close bars.
+3. **Line**: Clean closing price line.
+4. **Area**: Gradient filled price plot.
+5. **Heikin-Ashi**: Noise-filtered trend candles.
+6. **Renko**: Price-movement brick reversal blocks.
+7. **Point & Figure (`X` / `O`)**: Custom canvas engine tracking pure supply & demand columns.
+8. **Kagi (`Yang` / `Yin`)**: Variable-width reversal lines based on price breakout thresholds.
+9. **Three Line Break**: Pure price reversal block chart.
+10. **Range Bar**: Bars formed purely by fixed high-low price intervals regardless of time.
+*(Plus **Baseline** chart with upper/lower divergence shading)*.
 
 ---
 
-## How to Install & Run
+## 🚀 Getting Started (How to Run on Your PC)
 
-### Prerequisites
-- **Python 3.11+** (`python --version`)
-- **Node.js 20+** & **npm** (`node -v`, `npm -v`)
+### 📋 Prerequisites
+- **Python 3.11+** installed ([python.org](https://www.python.org/downloads/))
+- **Node.js 20+** installed ([nodejs.org](https://nodejs.org/))
+- **Git** installed ([git-scm.com](https://git-scm.com/))
 
-### 1. Clone & Install Dependencies
+---
+
+### Step 1: Clone the Repository
 ```bash
 git clone https://github.com/anirudhjanjirala/Agam-Paper-Trading.git
 cd "Agam-Paper-Trading"
+```
 
-# Backend dependencies
+### Step 2: Install Dependencies
+
+#### Backend (Python):
+```bash
 cd backend
 pip install -r requirements.txt
 cd ..
+```
 
-# Frontend dependencies
+#### Frontend (Node.js):
+```bash
 cd frontend
 npm install
 cd ..
 ```
 
-### 2. Configure Local Frontend Environment
-Create `frontend/.env.local` (gitignored) for 100% local execution:
-```env
-NEXT_PUBLIC_API_URL=http://localhost:8000
-NEXT_PUBLIC_WS_URL=ws://localhost:8000
+---
+
+### Step 3: Run the Application
+
+#### Option A: Quick 1-Click Launch (Windows)
+Simply double-click:
 ```
-*(In local development, `backend/core/auth.py` automatically generates a per-machine `.agam_jwt_secret` outside Git tracking and uses local SQLite `backend/agam_portfolio.db`.)*
+start_all.bat
+```
 
-### 3. Run Locally (Recommended Single-Terminal Launcher)
-
-- **Windows 1-Click**: Double-click **`start_all.bat`**.
-- **Dev Mode (Backend `--reload` + Next.js Dev Server)**:
-  ```bash
-  python start_agam.py
-  ```
-- **Production Mode (Fastest Compiled UI)**:
-  ```bash
-  cd frontend
-  npm run build
-  cd ..
-  python start_agam.py --prod
-  ```
-- **Headless / Background Flag**: Pass `--no-browser` (`python start_agam.py --prod --no-browser`) to skip auto-opening the browser tab. Press **`Ctrl+C`** once to stop both servers cleanly.
-
-### 4. Manual Two-Terminal Run (Optional)
+#### Option B: Unified Single Terminal Command (Cross-Platform)
 ```bash
-# Terminal 1 — FastAPI Backend (http://127.0.0.1:8000)
-cd backend
-python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+python start_agam.py
+```
+*This command starts both the FastAPI backend (`http://localhost:8000`) and Next.js frontend (`http://localhost:3000`) and automatically opens your browser.*
 
-# Terminal 2 — Next.js Frontend (http://localhost:3000)
+#### Option C: Production Compiled Mode (Fastest Performance)
+```bash
 cd frontend
-npm run dev
-```
-
-### 5. Production Stack (PostgreSQL + Redis + Docker Compose)
-Copy `.env.production.example` to `.env.production`, set strong non-default values (`JWT_SECRET` >= 32 chars, `POSTGRES_PASSWORD`, explicit `CORS_ORIGINS`), and run:
-```bash
-docker compose -f docker-compose.prod.yml --env-file .env.production up --build -d
+npm run build
+cd ..
+python start_agam.py --prod
 ```
 
 ---
 
-## What Changed Every Time (Release Summary)
-
-Full technical details and affected files are documented in **[CHANGELOG.md](CHANGELOG.md)**.
-
-| Release / Commit | Focus | Key Changes |
-| :--- | :--- | :--- |
-| **`v1.0.0`** (`87b170c`) | **Initial Open-Source Platform** | FastAPI backend, zero-cost Google Finance + News RSS engines, 5-market Polars universe, 55+ chained indicators, Bar Replay, Tick Aggregator, Alerts, MIT license, `start_agam.py`, and zero third-party chart logos (`attributionLogo: false`). |
-| **`v2.0.0`** (`d70306d`) | **Multi-Tenancy & Dual Theme** | PostgreSQL/SQLite SQLAlchemy multi-tenant isolation (`auth.py`, `models.py`, `tenant_store.py`, `ws_hub.py`), JWT cookie auth, full Next.js 16 / React 19 UI tree, Light/Dark (`#0B0E14`) Theme Engine, and Docker/Nginx deployment manifests. |
-| **`v3.0.0`** (`Latest`) | **Chart Parity, History, Drawings & Hardening** | **10 chart types** (`Bar`, `Line`, `Candlestick`, `Heikin-Ashi`, `Renko`, custom `Point & Figure`, `Area`, custom `Kagi`, `Line Break`, `Range Bar`); **per-symbol isolated drawings + `1px`–`4px` line weights**; **full listing-start `period1=0` historical data (`ALL`/`max`)**; punctuated ticker search fix; React `#418` hydration fix; `390×844` mobile drawer & header fix; empty IPO retry state; strict `JWT_SECRET`, CORS, Docker password, long partial-sell `realized_pnl`, and NumPy RSI divide-by-zero fixes. |
-
----
-
-## Project Structure
+## 📂 Project Architecture
 
 ```text
 Agam Paper Trading/
-├── start_agam.py              # Single-terminal launcher (--prod, --no-browser)
-├── start_all.bat              # Windows 1-click launcher
-├── CHANGELOG.md               # Detailed chronological change log
-├── docker-compose.prod.yml    # PostgreSQL + Redis + FastAPI + Next.js + Nginx stack
-├── docs/PROJECT_REPORT.md     # Full architecture, audit & code inspection report
-├── docs/screenshots/          # Verified terminal, chart style & mobile screenshots
+├── start_agam.py                    # Cross-platform unified process manager
+├── start_all.bat                    # Windows 1-click execution script
+├── README.md                        # Documentation and user manual
 ├── backend/
-│   ├── main.py                # FastAPI REST + WebSocket engine & OHLC/custom transforms
-│   ├── requirements.txt       # Python dependencies
-│   ├── core/                  # Auth, multi-tenant SQLAlchemy store, quant, replay, alerts, screener
-│   ├── migrations/            # PostgreSQL schema migrations
-│   └── engine/                # Async Google Finance (period1=0 max history) & Google News RSS
+│   ├── main.py                      # FastAPI REST and WebSocket gateway
+│   ├── requirements.txt             # Backend dependencies
+│   ├── core/
+│   │   ├── auth.py                  # Multi-profile vault, PBKDF2 auth, and JWT engine
+│   │   ├── tax_brokerage.py         # Live country & asset-class statutory tax engine
+│   │   ├── universe_loader.py       # 39,700+ instrument ingestion and caching pipeline
+│   │   ├── database.py              # SQLite WAL / PostgreSQL connection engine
+│   │   ├── models.py                # Database models for users, orders, and audits
+│   │   ├── tenant_store.py          # Isolated wallet balances and trade history
+│   │   └── quant.py                 # 55+ technical indicator algorithms
+│   └── engine/
+│       └── google_finance.py        # Real-time zero-cost market quote feeds
 └── frontend/
-    ├── public/agam-logo.svg   # Custom Agam brand mark
-    └── src/
-        ├── app/               # Next.js App Router pages, layout & ThemeProvider
-        ├── components/        # TradingViewChart, chartSeriesPlugins (Kagi/PnF), Overview, MultiChart, Screener
-        ├── lib/               # API/WS URL cleaner, token storage, currency/number formatters
-        └── workers/           # Web Worker for 60 FPS multi-chart indicator calculations
+    ├── src/
+    │   ├── app/                     # Next.js App Router (page.tsx, layout.tsx)
+    │   ├── components/
+    │   │   ├── AuthGate.tsx         # Multi-Profile Card Switcher UI
+    │   │   ├── AuthProvider.tsx     # Context hook for authentication and profile management
+    │   │   ├── TradingViewChart.tsx # Lightweight Charts v5 master container
+    │   │   ├── OrderDrawer.tsx      # Buy/Sell execution drawer with live tax preview
+    │   │   ├── CountryFlag.tsx      # Inline SVG flag icons for all jurisdictions
+    │   │   ├── RiskDisclaimerModal.tsx # Legal & risk disclaimer dialog
+    │   │   └── frontpage/
+    │   │       ├── FrontPageTaxCenter.tsx  # Asset-class tax & brokerage simulator
+    │   │       ├── FrontPagePortfolio.tsx  # Portfolio summary & asset distribution
+    │   │       ├── FrontPageOrders.tsx     # Live order book & execution history
+    │   │       └── FrontPageFeed.tsx       # Live market social feed & updates
+    │   └── lib/
+    │       └── format.ts            # Currency, percentage, and number formatting
+    └── public/
+        └── agam-logo.svg            # Official Agam brand SVG
 ```
 
 ---
 
-## Contact
+## 🔒 Security & Privacy Notice
 
-For questions, feedback, collaborations, or bug reports, reach out directly:
-
-- **Maintainer:** Anirudh Janjirala
-- **Email:** [anirudhjanjirala@gmail.com](mailto:anirudhjanjirala@gmail.com)
-- **GitHub:** [anirudhjanjirala/Agam-Paper-Trading](https://github.com/anirudhjanjirala/Agam-Paper-Trading)
-
-### Contributors
-- **Sai Raju** (Basani Sai Raju)
-- **Manoj**
-- **Lavan Kumar**
+- **100% Offline & Private to Your Machine**: Your account credentials, trading history, open positions, and journal notes are stored locally in an encrypted SQLite database on your computer (`backend/agam_platform.db`).
+- **No Cloud Tracking**: No analytics, telemetry, or personal data is collected or sent to external servers.
+- **Zero Cost**: Built completely using public non-commercial feeds without requiring paid API keys (TradingView Pro, Polygon.io, or AlphaVantage).
 
 ---
 
-## License
+## ⚠️ Educational Disclaimer
 
-This project is open source and available under the **[MIT License](LICENSE)**.
+> **IMPORTANT**: Agam Paper Trading Platform is an educational simulation tool designed to help users practice trading strategies and understand market dynamics, risk management, and regulatory tax structures. It does **not** handle real money, does **not** execute live exchange orders, and does **not** constitute financial or investment advice. Always consult a registered financial advisor before making actual market investments.
+
+---
+
+## 👥 Contributors & Contact
+
+- **Lead Architect & Maintainer:** Anirudh Janjirala ([anirudhjanjirala@gmail.com](mailto:anirudhjanjirala@gmail.com))
+- **GitHub:** [@anirudhjanjirala](https://github.com/anirudhjanjirala)
+- **Contributors:** Sai Raju, Manoj, Lavan Kumar
+
+---
+
+## 📄 License
+
+This project is licensed under the **MIT License** — feel free to fork, study, customize, and build upon it!
