@@ -4,6 +4,28 @@ All chronological releases, architectural upgrades, security hardening changes, 
 
 ---
 
+## v4.0.0 — Complete Crypto & Forex Markets, Institutional Quant Workbench & UI/UX Polish
+
+### Added
+- **24/7 Cryptocurrency & Global Forex Markets** ([universe_loader.py](backend/core/universe_loader.py), [tax_brokerage.py](backend/core/tax_brokerage.py), [google_finance.py](backend/engine/google_finance.py), [paper_wallets.py](backend/core/paper_wallets.py)):
+  - Expanded global coverage to **40,808 instruments** across **7 markets** (`USA`, `IND`, `CHINA`, `EU`, `CANADA`, `CRYPTO`, `FOREX`) including **1,023+ Crypto tokens** (`24/7 LIVE`) and **66+ Forex pairs** (`G10 Majors`, crosses, exotics, `DX-Y.NYB`).
+  - Added fractional Crypto execution (`0.00001+` units), `20x` Forex margin with pip value (`$/pip`) & lot presets (`0.01`–`1.00`), Crypto Spot/Perp fee schedules, ECN Forex commissions, and automated FX quote-to-settlement USD scaling (`compute_fx_quote_to_settle`).
+- **Vectorized Strategy Backtester Lab** ([BacktestLab.tsx](frontend/src/components/BacktestLab.tsx), [quant_engine.py](backend/core/quant_engine.py), `POST /api/backtest`):
+  - Backtest 5 strategies (`EMA Cross`, `Supertrend`, `RSI Reversion`, `MACD Momentum`, `BB Breakout`) with Equity vs. Buy & Hold chart, Sharpe Ratio, Max Drawdown %, Win Rate, Profit Factor, fee bps, and Simulated Trade Log.
+- **Multi-Timeframe Technical Signal Scorecard & Pivot Engine** (`GET /api/asset/{symbol}/technicals`, [RightSidebar.tsx](frontend/src/components/tv/RightSidebar.tsx)):
+  - Real-time `15m / 1h / 4h / 1d` consensus badges, BUY/NEUTRAL/SELL tally, overall rating (`STRONG BUY`–`STRONG SELL`), Classic & Fibonacci pivots (`S1 / P / R1`), and ATR.
+- **Scaled Limit Ladder Orders, Atomic Position `Flip` & `50%` Trim** ([OrderDrawer.tsx](frontend/src/components/OrderDrawer.tsx), [PositionsTable.tsx](frontend/src/components/PositionsTable.tsx), [FrontPagePortfolio.tsx](frontend/src/components/frontpage/FrontPagePortfolio.tsx), [tenant_store.py](backend/core/tenant_store.py)):
+  - Added `LADDER` entry mode (`2–8` staggered rungs with per-rung `R1..Rn` badge previews via `POST /api/orders/ladder`), 1-click atomic Long <-> Short position reversal (`POST /api/positions/{id}/reverse`), fractional-safe `50%` Trim, Chart PNG Snapshot export, and `Alt+B`/`Alt+S` trading hotkeys.
+- **Institutional Risk & Exposure Analytics Desk** (`GET /api/portfolio/risk-analytics`, [FrontPagePortfolio.tsx](frontend/src/components/frontpage/FrontPagePortfolio.tsx)):
+  - Real-time Total Global Equity USD, Margin Utilization %, Portfolio Heat % (stop-loss risk), Long/Short/Net Exposure, Profit Factor, Expectancy/Trade, and Max Drawdown %.
+
+### Fixed
+- **Screener FOREX Tier Ordering & FX Price Formatting** ([screener_engine.py](backend/core/screener_engine.py), [format.ts](frontend/src/lib/format.ts)): Prioritized `FX_MAJOR` and `CRYPTO_MAJOR` tiers during default volume scans so zero-volume Yahoo Spot FX pairs aren't sorted below synthetic exotics; removed erroneous `$` prefixes on non-INR FX quote displays (`159.555 JPY`).
+- **Micro-Cap & FX Quant/Tick Precision** ([quant_engine.py](backend/core/quant_engine.py), [tick_aggregator.py](backend/core/tick_aggregator.py), [OrderFlowSuite.tsx](frontend/src/components/OrderFlowSuite.tsx), [quantWorker.ts](frontend/src/workers/quantWorker.ts)): Added adaptive decimal precision (up to 8 decimals), `float` tick/bar volumes, Wilder Supertrend band ratcheting, and dynamic `POC`/`TPO`/`Footprint` bucketing.
+- **UI/UX, Dark Mode & React 19 Fixes**: Fixed white initial canvas on Dark-Mode [MultiChartWorkspace.tsx](frontend/src/components/MultiChartWorkspace.tsx), `BacktestLab` delayed `chartEl` mount lifecycle, Dark-Mode MTF signal pill contrast in [RightSidebar.tsx](frontend/src/components/tv/RightSidebar.tsx), `Pending` order double-click Cancel race in [PositionsTable.tsx](frontend/src/components/PositionsTable.tsx), compact drawer tab spacing in [BottomTerminalDrawer.tsx](frontend/src/components/tv/BottomTerminalDrawer.tsx), Windows emoji flag replacement in [IpoCardList.tsx](frontend/src/components/IpoCardList.tsx), and FX settlement scaling on rejected/modified pending orders in [tenant_store.py](backend/core/tenant_store.py).
+
+---
+
 ## v3.0.0 — Chart Styles Parity, Listing-Start History, Isolated Drawings & Security/UI Hardening
 
 ### Added

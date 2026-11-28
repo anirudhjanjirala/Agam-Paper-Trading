@@ -621,9 +621,9 @@ export default function RightSidebar({
                                 key={tf}
                                 className={`text-center py-0.5 rounded border font-bold ${
                                   bull
-                                    ? "bg-[#E8F5E9]/70 border-[#089981]/30 text-[#089981]"
+                                    ? "bg-[#E8F5E9] border-[#089981]/30 text-[#089981]"
                                     : bear
-                                    ? "bg-[#FFEBEE]/70 border-[#F23645]/30 text-[#F23645]"
+                                    ? "bg-[#FFEBEE] border-[#F23645]/30 text-[#F23645]"
                                     : "bg-[#F8F9FD] border-[#E0E3EB] text-[#787B86]"
                                 }`}
                               >

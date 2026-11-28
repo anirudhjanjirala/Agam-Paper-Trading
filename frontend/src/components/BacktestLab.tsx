@@ -101,10 +101,14 @@ export default function BacktestLab({ defaultSymbol }: { defaultSymbol: string }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultSymbol, strategy, interval, period, allowShort]);
 
+  const hasCurve = Boolean(result?.equity_curve?.length);
+
   useEffect(() => {
-    if (!chartEl.current) return;
+    if (!hasCurve || !chartEl.current) return;
     const isDark = theme === "dark";
     const chart = createChart(chartEl.current, {
+      width: chartEl.current.clientWidth || 520,
+      height: 220,
       layout: {
         background: { type: ColorType.Solid, color: isDark ? "#0B0E14" : "#FFFFFF" },
         textColor: isDark ? "#D1D4DC" : "#131722",
@@ -132,7 +136,8 @@ export default function BacktestLab({ defaultSymbol }: { defaultSymbol: string }
     });
     const ro = new ResizeObserver(() => {
       if (chartEl.current && chartRef.current) {
-        chartRef.current.applyOptions({ width: chartEl.current.clientWidth, height: 220 });
+        const w = chartEl.current.clientWidth;
+        if (w > 0) chartRef.current.applyOptions({ width: w, height: 220 });
       }
     });
     ro.observe(chartEl.current);
@@ -143,7 +148,7 @@ export default function BacktestLab({ defaultSymbol }: { defaultSymbol: string }
       stratSeriesRef.current = null;
       bhSeriesRef.current = null;
     };
-  }, [theme]);
+  }, [theme, hasCurve]);
 
   useEffect(() => {
     if (!result?.equity_curve?.length || !stratSeriesRef.current || !bhSeriesRef.current) return;
@@ -156,7 +161,7 @@ export default function BacktestLab({ defaultSymbol }: { defaultSymbol: string }
     stratSeriesRef.current.setData(stratPts);
     bhSeriesRef.current.setData(bhPts);
     chartRef.current?.timeScale().fitContent();
-  }, [result]);
+  }, [result, theme, hasCurve]);
 
   return (
     <div className="bg-[#FFFFFF] border border-[#E0E3EB] rounded-2xl p-4 shadow-sm space-y-4">
