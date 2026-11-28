@@ -24,11 +24,34 @@ from core.paper_wallets import DEFAULT_WALLETS
 from core.tax_brokerage import (
     ChargeBreakdown,
     calculate_order_charges,
+    compute_fx_quote_to_settle,
     estimate_capital_gains_tax_rate,
     infer_country_and_sub,
 )
 
-SUPPORTED_COUNTRIES = ("IND", "USA", "CANADA", "CHINA", "EU")
+SUPPORTED_COUNTRIES = ("IND", "USA", "CANADA", "CHINA", "EU", "CRYPTO", "FOREX")
+
+
+def _r_px(px: float, symbol: str = "") -> float:
+    ap = abs(float(px or 0.0))
+    if ap <= 0:
+        return 0.0
+    if ap < 0.0001:
+        return round(float(px), 8)
+    if ap < 0.01:
+        return round(float(px), 6)
+    if symbol.upper().endswith("=X"):
+        return round(float(px), 3 if ap >= 50.0 else 5)
+    if ap < 10.0:
+        return round(float(px), 4)
+    return round(float(px), 2)
+
+
+def _r_qty(qty: float) -> float:
+    val = float(qty or 0.0)
+    if abs(val - round(val)) < 1e-9:
+        return float(round(val))
+    return round(val, 6)
 
 
 def _utcnow() -> datetime:
@@ -99,7 +122,7 @@ class TenantPortfolioService:
         pos_rows = db.scalars(select(PositionModel).where(PositionModel.user_id == user_id)).all()
         margin_by_curr: Dict[str, float] = {c: 0.0 for c in wallets_map}
         for p in pos_rows:
-            mb = float(p.margin_blocked or (p.avg_entry_price * p.qty / max(1.0, p.leverage or 1.0)))
+            mb = float(p.margin_blocked or (p.avg_entry_price * p.qty * compute_fx_quote_to_settle(p.symbol, p.currency, p.avg_entry_price) / max(1.0, p.leverage or 1.0)))
             margin_by_curr[p.currency] = round(margin_by_curr.get(p.currency, 0.0) + mb, 2)
         for c, w in wallets_map.items():
             w.margin_used = round(margin_by_curr.get(c, 0.0), 2)
@@ -118,7 +141,7 @@ class TenantPortfolioService:
         mode: str,
         product_type: str,
         broker_plan: str,
-        quantity: int,
+        quantity: float,
         price: float,
         limit_price: Optional[float],
         stop_loss: Optional[float],
@@ -127,6 +150,8 @@ class TenantPortfolioService:
         reason: str,
     ) -> None:
         try:
+            q_cln = _r_qty(quantity)
+            px_cln = _r_px(float(price), symbol)
             row = OrderModel(
                 id=f"rej-{uuid.uuid4().hex[:8]}",
                 user_id=user_id,
@@ -140,10 +165,10 @@ class TenantPortfolioService:
                 product_type=product_type,
                 broker_plan=broker_plan,
                 status="REJECTED",
-                price=round(float(price), 4),
-                limit_price=round(float(limit_price), 4) if limit_price else None,
-                qty=quantity,
-                gross_amount=round(float(price) * quantity, 2),
+                price=px_cln,
+                limit_price=_r_px(float(limit_price), symbol) if limit_price else None,
+                qty=q_cln,
+                gross_amount=round(float(price) * q_cln * compute_fx_quote_to_settle(symbol, currency, float(price), None), 2),
                 charges=0.0,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
@@ -172,9 +197,9 @@ class TenantPortfolioService:
             "order_mode": o.order_mode,
             "product_type": o.product_type or "DELIVERY",
             "broker_plan": o.broker_plan or "DISCOUNT",
-            "quantity": o.qty,
-            "price": round(float(o.price), 4),
-            "limit_price": round(float(o.limit_price), 4) if o.limit_price is not None else None,
+            "quantity": _r_qty(float(o.qty)),
+            "price": _r_px(float(o.price), o.symbol),
+            "limit_price": _r_px(float(o.limit_price), o.symbol) if o.limit_price is not None else None,
             "gross_amount": round(float(o.gross_amount or (o.price * o.qty)), 2),
             "charges": round(float(o.charges or 0.0), 2),
             "brokerage": round(float(o.brokerage or 0.0), 2),
@@ -200,7 +225,13 @@ class TenantPortfolioService:
         }
 
     @classmethod
-    def get_snapshot(cls, db: Session, user_id: str, price_map: Dict[str, dict]) -> dict:
+    def get_snapshot(
+        cls,
+        db: Session,
+        user_id: str,
+        price_map: Dict[str, dict],
+        fx_rates: Optional[Dict[str, float]] = None,
+    ) -> dict:
         wallets_map = cls._ensure_wallets(db, user_id)
         positions_rows = db.scalars(
             select(PositionModel).where(PositionModel.user_id == user_id)
@@ -238,29 +269,32 @@ class TenantPortfolioService:
         for pos in positions_rows:
             q = price_map.get(pos.symbol)
             cur_px = float(q["price"]) if q and q.get("price", 0) > 0 else float(pos.current_price or pos.avg_entry_price)
-            pos_cur_px = round(cur_px, 4)
+            pos_cur_px = _r_px(cur_px, pos.symbol)
             country = pos.country or infer_country_and_sub(pos.symbol, None, pos.exchange, pos.currency)[0]
             prod = pos.product_type or "DELIVERY"
             lev = max(1.0, float(pos.leverage or 1.0))
-            mb = float(pos.margin_blocked or (pos.avg_entry_price * pos.qty / lev))
+            qty_val = _r_qty(float(pos.qty))
+            fx_scale = compute_fx_quote_to_settle(pos.symbol, pos.currency, cur_px, usd_rates=fx_rates)
+            mb = float(pos.margin_blocked or (pos.avg_entry_price * qty_val * fx_scale / lev))
 
             if pos.side == "BUY":
-                gross_pnl = (cur_px - pos.avg_entry_price) * pos.qty
+                gross_pnl = (cur_px - pos.avg_entry_price) * qty_val * fx_scale
             else:
-                gross_pnl = (pos.avg_entry_price - cur_px) * pos.qty
+                gross_pnl = (pos.avg_entry_price - cur_px) * qty_val * fx_scale
 
             pct = (gross_pnl / mb) * 100.0 if mb > 0 else 0.0
 
             exit_side = "SELL" if pos.side == "BUY" else "BUY"
             est_exit_bd = calculate_order_charges(
                 symbol=pos.symbol,
-                quantity=pos.qty,
+                quantity=qty_val,
                 price=cur_px,
                 side=exit_side,
                 product_type=prod,
                 region=country,
                 exchange=pos.exchange,
                 currency=pos.currency,
+                fx_quote_to_settle=fx_scale,
             )
             entry_chg = float(pos.entry_charges or 0.0)
             net_pnl = gross_pnl - entry_chg - est_exit_bd.total_charges
@@ -279,8 +313,8 @@ class TenantPortfolioService:
                 "product_type": prod,
                 "leverage": lev,
                 "margin_blocked": round(mb, 2),
-                "quantity": pos.qty,
-                "avg_price": round(float(pos.avg_entry_price), 4),
+                "quantity": qty_val,
+                "avg_price": _r_px(float(pos.avg_entry_price), pos.symbol),
                 "current_price": pos_cur_px,
                 "currency": pos.currency,
                 "order_type": pos.side,
@@ -309,6 +343,8 @@ class TenantPortfolioService:
             "CANADA": "CAD",
             "CHINA": "CNY",
             "EU": "EUR",
+            "CRYPTO": "USD",
+            "FOREX": "USD",
         }
         for c in SUPPORTED_COUNTRIES:
             tax_by_country[c] = {
@@ -482,9 +518,9 @@ class TenantPortfolioService:
                     "currency": ct.currency,
                     "product_type": ct.product_type,
                     "side": ct.side,
-                    "quantity": ct.qty,
-                    "entry_price": round(float(ct.entry_price), 4),
-                    "exit_price": round(float(ct.exit_price), 4),
+                    "quantity": _r_qty(float(ct.qty)),
+                    "entry_price": _r_px(float(ct.entry_price), ct.symbol),
+                    "exit_price": _r_px(float(ct.exit_price), ct.symbol),
                     "gross_pnl": round(float(ct.gross_pnl), 2),
                     "entry_charges": round(float(ct.entry_charges), 2),
                     "exit_charges": round(float(ct.exit_charges), 2),
@@ -512,7 +548,7 @@ class TenantPortfolioService:
         symbol: str,
         name: str,
         currency: str,
-        quantity: int,
+        quantity: float,
         order_type: str,
         order_mode: str,
         live_price: float,
@@ -526,6 +562,7 @@ class TenantPortfolioService:
         exchange: Optional[str] = None,
         category: str = "stocks",
         notes: str = "",
+        fx_rates: Optional[Dict[str, float]] = None,
     ) -> dict:
         side = order_type.upper().strip()
         mode = order_mode.upper().strip()
@@ -536,9 +573,12 @@ class TenantPortfolioService:
         if plan not in ("DISCOUNT", "PRO"):
             plan = "DISCOUNT"
         resolved_country, _, resolved_exch = infer_country_and_sub(symbol, country, exchange, currency)
+        qty_clean = _r_qty(float(quantity))
 
-        if quantity <= 0:
+        if qty_clean <= 0:
             raise ValueError("Quantity must be greater than zero.")
+        if resolved_country != "CRYPTO" and abs(qty_clean - round(qty_clean)) > 1e-6 and resolved_country != "FOREX":
+            qty_clean = float(max(1, round(qty_clean)))
         if live_price <= 0:
             raise ValueError(f"Live market price unavailable for {symbol}.")
         if trailing_sl is not None and trailing_sl <= 0:
@@ -553,6 +593,8 @@ class TenantPortfolioService:
                 else (side == "BUY" and live_price >= limit_price) or (side == "SELL" and live_price <= limit_price)
             )
             if not should_fill_now:
+                fx_scale = compute_fx_quote_to_settle(symbol, currency, float(limit_price), usd_rates=fx_rates)
+                lp_cln = _r_px(float(limit_price), symbol)
                 pending = OrderModel(
                     id=f"pnd-{uuid.uuid4().hex[:8]}",
                     user_id=user_id,
@@ -567,9 +609,9 @@ class TenantPortfolioService:
                     broker_plan=plan,
                     status="PENDING",
                     price=0.0,
-                    limit_price=round(float(limit_price), 4),
-                    qty=quantity,
-                    gross_amount=round(float(limit_price) * quantity, 2),
+                    limit_price=lp_cln,
+                    qty=qty_clean,
+                    gross_amount=round(float(limit_price) * qty_clean * fx_scale, 2),
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     trailing_sl=trailing_sl,
@@ -579,7 +621,7 @@ class TenantPortfolioService:
                 db.commit()
                 return {
                     "status": "PENDING",
-                    "message": f"{mode.title()} {side} ({prod}) queued for {quantity} {symbol} @ {currency} {limit_price:.2f}",
+                    "message": f"{mode.title()} {side} ({prod}) queued for {qty_clean} {symbol} @ {currency} {lp_cln}",
                     "order": cls._serialize_order(pending),
                 }
 
@@ -590,7 +632,7 @@ class TenantPortfolioService:
                 symbol=symbol,
                 name=name,
                 currency=currency,
-                quantity=quantity,
+                quantity=qty_clean,
                 side=side,
                 exec_price=live_price,
                 stop_loss=stop_loss,
@@ -603,6 +645,7 @@ class TenantPortfolioService:
                 exchange=resolved_exch,
                 category=category,
                 notes=notes,
+                fx_rates=fx_rates,
             )
         except ValueError as err:
             cls._record_rejected_order(
@@ -617,7 +660,7 @@ class TenantPortfolioService:
                 mode=mode,
                 product_type=prod,
                 broker_plan=plan,
-                quantity=quantity,
+                quantity=qty_clean,
                 price=live_price,
                 limit_price=limit_price,
                 stop_loss=stop_loss,
@@ -656,7 +699,7 @@ class TenantPortfolioService:
         symbol: str,
         name: str,
         currency: str,
-        quantity: int,
+        quantity: float,
         side: str,
         exec_price: float,
         stop_loss: Optional[float] = None,
@@ -670,10 +713,14 @@ class TenantPortfolioService:
         category: str = "stocks",
         notes: str = "",
         existing_order: Optional[OrderModel] = None,
+        fx_rates: Optional[Dict[str, float]] = None,
     ) -> dict:
         resolved_country, _, resolved_exch = infer_country_and_sub(symbol, country, exchange, currency)
         prod = (product_type or "DELIVERY").upper().strip()
         plan = (broker_plan or "DISCOUNT").upper().strip()
+        quantity = _r_qty(float(quantity))
+        fx_scale = compute_fx_quote_to_settle(symbol, currency, exec_price, usd_rates=fx_rates)
+        px_cln = _r_px(exec_price, symbol)
 
         wallets_map = cls._ensure_wallets(db, user_id, extra_currency=currency)
         wallet = wallets_map[currency]
@@ -699,6 +746,7 @@ class TenantPortfolioService:
             exchange=resolved_exch,
             currency=currency,
             category=category,
+            fx_quote_to_settle=fx_scale,
         )
         lev = bd_total.leverage
 
@@ -708,10 +756,10 @@ class TenantPortfolioService:
 
         if side == "BUY":
             if existing and existing.side == "SHORT":
-                cover_qty = min(quantity, existing.qty)
+                cover_qty = _r_qty(min(quantity, float(existing.qty)))
                 bd_cover = (
                     bd_total
-                    if cover_qty == quantity
+                    if abs(cover_qty - quantity) < 1e-8
                     else calculate_order_charges(
                         symbol=symbol,
                         quantity=cover_qty,
@@ -723,13 +771,14 @@ class TenantPortfolioService:
                         exchange=resolved_exch,
                         currency=currency,
                         category=category,
+                        fx_quote_to_settle=fx_scale,
                     )
                 )
                 ratio = cover_qty / existing.qty if existing.qty > 0 else 1.0
-                released_margin = float(existing.margin_blocked or (existing.avg_entry_price * existing.qty / lev)) * ratio
+                released_margin = float(existing.margin_blocked or (existing.avg_entry_price * existing.qty * fx_scale / lev)) * ratio
                 entry_chg_share = float(existing.entry_charges or 0.0) * ratio
 
-                gross_pnl = (existing.avg_entry_price - exec_price) * cover_qty
+                gross_pnl = (existing.avg_entry_price - exec_price) * cover_qty * fx_scale
                 net_pnl = gross_pnl - entry_chg_share - bd_cover.total_charges
                 tax_rate, _ = estimate_capital_gains_tax_rate(resolved_country, prod)
                 est_tax = round(max(0.0, net_pnl) * tax_rate, 2)
@@ -751,8 +800,8 @@ class TenantPortfolioService:
                         product_type=prod,
                         side="SHORT",
                         qty=cover_qty,
-                        entry_price=round(float(existing.avg_entry_price), 4),
-                        exit_price=round(exec_price, 4),
+                        entry_price=_r_px(float(existing.avg_entry_price), symbol),
+                        exit_price=px_cln,
                         gross_pnl=round(gross_pnl, 2),
                         entry_charges=round(entry_chg_share, 2),
                         exit_charges=round(bd_cover.total_charges, 2),
@@ -769,23 +818,23 @@ class TenantPortfolioService:
                 realized_gross_total += gross_pnl
                 realized_net_total += net_pnl
 
-                existing.qty -= cover_qty
+                existing.qty = _r_qty(float(existing.qty) - cover_qty)
                 existing.margin_blocked = max(0.0, round(float(existing.margin_blocked or 0.0) - released_margin, 2))
                 existing.entry_charges = max(0.0, round(float(existing.entry_charges or 0.0) - entry_chg_share, 2))
                 existing.realized_pnl = round(float(existing.realized_pnl or 0.0) + net_pnl, 2)
-                if existing.qty <= 0:
+                if existing.qty <= 1e-8:
                     db.delete(existing)
                     db.flush()
                     existing = None
-                msg = f"Covered {cover_qty} SHORT {symbol} ({prod}) @ {currency} {exec_price:.2f}"
-                rem_qty = quantity - cover_qty
+                msg = f"Covered {cover_qty} SHORT {symbol} ({prod}) @ {currency} {px_cln}"
+                rem_qty = _r_qty(quantity - cover_qty)
             else:
                 rem_qty = quantity
 
-            if rem_qty > 0:
+            if rem_qty > 1e-8:
                 bd_rem = (
                     bd_total
-                    if rem_qty == quantity
+                    if abs(rem_qty - quantity) < 1e-8
                     else calculate_order_charges(
                         symbol=symbol,
                         quantity=rem_qty,
@@ -797,9 +846,10 @@ class TenantPortfolioService:
                         exchange=resolved_exch,
                         currency=currency,
                         category=category,
+                        fx_quote_to_settle=fx_scale,
                     )
                 )
-                rem_notional = exec_price * rem_qty
+                rem_notional_raw = exec_price * rem_qty
                 req_margin = bd_rem.margin_required
                 total_cost = req_margin + bd_rem.total_charges
                 if balance < total_cost:
@@ -809,15 +859,15 @@ class TenantPortfolioService:
                 wallet.balance = round(balance - total_cost, 2)
                 init_sl = stop_loss
                 if trailing_sl and init_sl is None:
-                    init_sl = round(exec_price - trailing_sl, 4)
+                    init_sl = _r_px(exec_price - trailing_sl, symbol)
 
                 if existing and existing.side == "BUY":
-                    new_qty = existing.qty + rem_qty
-                    existing.avg_entry_price = round(
-                        ((existing.avg_entry_price * existing.qty) + rem_notional) / new_qty, 4
+                    new_qty = _r_qty(float(existing.qty) + rem_qty)
+                    existing.avg_entry_price = _r_px(
+                        ((existing.avg_entry_price * existing.qty) + rem_notional_raw) / new_qty, symbol
                     )
                     existing.qty = new_qty
-                    existing.current_price = round(exec_price, 4)
+                    existing.current_price = px_cln
                     existing.margin_blocked = round(float(existing.margin_blocked or 0.0) + req_margin, 2)
                     existing.entry_charges = round(float(existing.entry_charges or 0.0) + bd_rem.total_charges, 2)
                     existing.highest_price = max(float(existing.highest_price or exec_price), exec_price)
@@ -843,25 +893,25 @@ class TenantPortfolioService:
                             margin_blocked=round(req_margin, 2),
                             entry_charges=round(bd_rem.total_charges, 2),
                             qty=rem_qty,
-                            avg_entry_price=round(exec_price, 4),
-                            current_price=round(exec_price, 4),
+                            avg_entry_price=px_cln,
+                            current_price=px_cln,
                             stop_loss=init_sl,
                             take_profit=take_profit,
                             trailing_sl=trailing_sl,
-                            highest_price=round(exec_price, 4),
-                            lowest_price=round(exec_price, 4),
+                            highest_price=px_cln,
+                            lowest_price=px_cln,
                             opened_at=_utcnow(),
                         )
                     )
-                buy_msg = f"Bought {rem_qty} {symbol} ({prod}) @ {currency} {exec_price:.2f} | Fees: {currency} {bd_rem.total_charges:.2f}"
+                buy_msg = f"Bought {rem_qty} {symbol} ({prod}) @ {currency} {px_cln} | Fees: {currency} {bd_rem.total_charges:.2f}"
                 msg = f"{msg} + {buy_msg}" if msg else buy_msg
 
         elif side == "SELL":
             if existing and existing.side == "BUY":
-                sell_qty = min(quantity, existing.qty)
+                sell_qty = _r_qty(min(quantity, float(existing.qty)))
                 bd_sell = (
                     bd_total
-                    if sell_qty == quantity
+                    if abs(sell_qty - quantity) < 1e-8
                     else calculate_order_charges(
                         symbol=symbol,
                         quantity=sell_qty,
@@ -873,13 +923,14 @@ class TenantPortfolioService:
                         exchange=resolved_exch,
                         currency=currency,
                         category=category,
+                        fx_quote_to_settle=fx_scale,
                     )
                 )
                 ratio = sell_qty / existing.qty if existing.qty > 0 else 1.0
-                released_margin = float(existing.margin_blocked or (existing.avg_entry_price * existing.qty / lev)) * ratio
+                released_margin = float(existing.margin_blocked or (existing.avg_entry_price * existing.qty * fx_scale / lev)) * ratio
                 entry_chg_share = float(existing.entry_charges or 0.0) * ratio
 
-                gross_pnl = (exec_price - existing.avg_entry_price) * sell_qty
+                gross_pnl = (exec_price - existing.avg_entry_price) * sell_qty * fx_scale
                 net_pnl = gross_pnl - entry_chg_share - bd_sell.total_charges
                 tax_rate, _ = estimate_capital_gains_tax_rate(resolved_country, prod)
                 est_tax = round(max(0.0, net_pnl) * tax_rate, 2)
@@ -901,8 +952,8 @@ class TenantPortfolioService:
                         product_type=prod,
                         side="LONG",
                         qty=sell_qty,
-                        entry_price=round(float(existing.avg_entry_price), 4),
-                        exit_price=round(exec_price, 4),
+                        entry_price=_r_px(float(existing.avg_entry_price), symbol),
+                        exit_price=px_cln,
                         gross_pnl=round(gross_pnl, 2),
                         entry_charges=round(entry_chg_share, 2),
                         exit_charges=round(bd_sell.total_charges, 2),
@@ -919,23 +970,23 @@ class TenantPortfolioService:
                 realized_gross_total += gross_pnl
                 realized_net_total += net_pnl
 
-                existing.qty -= sell_qty
+                existing.qty = _r_qty(float(existing.qty) - sell_qty)
                 existing.margin_blocked = max(0.0, round(float(existing.margin_blocked or 0.0) - released_margin, 2))
                 existing.entry_charges = max(0.0, round(float(existing.entry_charges or 0.0) - entry_chg_share, 2))
                 existing.realized_pnl = round(float(existing.realized_pnl or 0.0) + net_pnl, 2)
-                if existing.qty <= 0:
+                if existing.qty <= 1e-8:
                     db.delete(existing)
                     db.flush()
                     existing = None
-                msg = f"Sold {sell_qty} {symbol} ({prod}) @ {currency} {exec_price:.2f} | Net P&L: {net_pnl:+.2f}"
-                rem_qty = quantity - sell_qty
+                msg = f"Sold {sell_qty} {symbol} ({prod}) @ {currency} {px_cln} | Net P&L: {net_pnl:+.2f}"
+                rem_qty = _r_qty(quantity - sell_qty)
             else:
                 rem_qty = quantity
 
-            if rem_qty > 0:
+            if rem_qty > 1e-8:
                 bd_rem = (
                     bd_total
-                    if rem_qty == quantity
+                    if abs(rem_qty - quantity) < 1e-8
                     else calculate_order_charges(
                         symbol=symbol,
                         quantity=rem_qty,
@@ -947,9 +998,10 @@ class TenantPortfolioService:
                         exchange=resolved_exch,
                         currency=currency,
                         category=category,
+                        fx_quote_to_settle=fx_scale,
                     )
                 )
-                rem_notional = exec_price * rem_qty
+                rem_notional_raw = exec_price * rem_qty
                 req_margin = bd_rem.margin_required
                 margin_req = req_margin + bd_rem.total_charges
                 if balance < margin_req:
@@ -959,15 +1011,15 @@ class TenantPortfolioService:
                 wallet.balance = round(balance - margin_req, 2)
                 init_sl = stop_loss
                 if trailing_sl and init_sl is None:
-                    init_sl = round(exec_price + trailing_sl, 4)
+                    init_sl = _r_px(exec_price + trailing_sl, symbol)
 
                 if existing and existing.side == "SHORT":
-                    new_qty = existing.qty + rem_qty
-                    existing.avg_entry_price = round(
-                        ((existing.avg_entry_price * existing.qty) + rem_notional) / new_qty, 4
+                    new_qty = _r_qty(float(existing.qty) + rem_qty)
+                    existing.avg_entry_price = _r_px(
+                        ((existing.avg_entry_price * existing.qty) + rem_notional_raw) / new_qty, symbol
                     )
                     existing.qty = new_qty
-                    existing.current_price = round(exec_price, 4)
+                    existing.current_price = px_cln
                     existing.margin_blocked = round(float(existing.margin_blocked or 0.0) + req_margin, 2)
                     existing.entry_charges = round(float(existing.entry_charges or 0.0) + bd_rem.total_charges, 2)
                     existing.lowest_price = min(float(existing.lowest_price or exec_price), exec_price)
@@ -993,17 +1045,17 @@ class TenantPortfolioService:
                             margin_blocked=round(req_margin, 2),
                             entry_charges=round(bd_rem.total_charges, 2),
                             qty=rem_qty,
-                            avg_entry_price=round(exec_price, 4),
-                            current_price=round(exec_price, 4),
+                            avg_entry_price=px_cln,
+                            current_price=px_cln,
                             stop_loss=init_sl,
                             take_profit=take_profit,
                             trailing_sl=trailing_sl,
-                            highest_price=round(exec_price, 4),
-                            lowest_price=round(exec_price, 4),
+                            highest_price=px_cln,
+                            lowest_price=px_cln,
                             opened_at=_utcnow(),
                         )
                     )
-                short_msg = f"Shorted {rem_qty} {symbol} ({prod}) @ {currency} {exec_price:.2f} | Fees: {currency} {bd_rem.total_charges:.2f}"
+                short_msg = f"Shorted {rem_qty} {symbol} ({prod}) @ {currency} {px_cln} | Fees: {currency} {bd_rem.total_charges:.2f}"
                 msg = f"{msg} + {short_msg}" if msg else short_msg
         else:
             raise ValueError("order_type must be BUY or SELL")
@@ -1011,7 +1063,7 @@ class TenantPortfolioService:
         if existing_order is not None:
             order_row = existing_order
             order_row.status = "FILLED"
-            order_row.price = round(exec_price, 4)
+            order_row.price = px_cln
             order_row.realized_pnl = round(realized_gross_total, 2)
             order_row.net_pnl = round(realized_net_total, 2)
             order_row.filled_at = _utcnow()
@@ -1030,7 +1082,7 @@ class TenantPortfolioService:
                 product_type=prod,
                 broker_plan=plan,
                 status="FILLED",
-                price=round(exec_price, 4),
+                price=px_cln,
                 qty=quantity,
                 realized_pnl=round(realized_gross_total, 2),
                 net_pnl=round(realized_net_total, 2),
@@ -1074,9 +1126,10 @@ class TenantPortfolioService:
         user_id: str,
         order_id: str,
         limit_price: Optional[float] = None,
-        quantity: Optional[int] = None,
+        quantity: Optional[float] = None,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
+        fx_rates: Optional[Dict[str, float]] = None,
     ) -> dict:
         row = db.scalar(
             select(OrderModel).where(
@@ -1090,16 +1143,18 @@ class TenantPortfolioService:
         if limit_price is not None:
             if limit_price <= 0:
                 raise ValueError("Limit price must be positive")
-            row.limit_price = round(float(limit_price), 4)
+            row.limit_price = _r_px(float(limit_price), row.symbol)
         if quantity is not None:
             if quantity <= 0:
                 raise ValueError("Quantity must be positive")
-            row.qty = int(quantity)
+            row.qty = _r_qty(float(quantity))
         if stop_loss is not None:
             row.stop_loss = float(stop_loss) if stop_loss > 0 else None
         if take_profit is not None:
             row.take_profit = float(take_profit) if take_profit > 0 else None
-        row.gross_amount = round(float(row.limit_price or row.price) * row.qty, 2)
+        px_eff = float(row.limit_price or row.price)
+        fx_scale = compute_fx_quote_to_settle(row.symbol, row.currency, px_eff, fx_rates)
+        row.gross_amount = round(px_eff * row.qty * fx_scale, 2)
         db.commit()
         return {"status": "MODIFIED", "order": cls._serialize_order(row)}
 
@@ -1126,11 +1181,11 @@ class TenantPortfolioService:
             if pos.side == "BUY":
                 pos.highest_price = max(float(pos.highest_price or cur), cur)
                 if pos.stop_loss is None:
-                    pos.stop_loss = round(pos.highest_price - pos.trailing_sl, 4)
+                    pos.stop_loss = _r_px(pos.highest_price - pos.trailing_sl, pos.symbol)
             else:
                 pos.lowest_price = min(float(pos.lowest_price or cur), cur)
                 if pos.stop_loss is None:
-                    pos.stop_loss = round(pos.lowest_price + pos.trailing_sl, 4)
+                    pos.stop_loss = _r_px(pos.lowest_price + pos.trailing_sl, pos.symbol)
         else:
             pos.trailing_sl = None
         db.commit()
@@ -1150,6 +1205,7 @@ class TenantPortfolioService:
         user_id: str,
         price_map: Dict[str, dict],
         country: Optional[str] = None,
+        fx_rates: Optional[Dict[str, float]] = None,
     ) -> dict:
         query = select(PositionModel).where(PositionModel.user_id == user_id)
         if country and country.upper() != "ALL":
@@ -1176,9 +1232,170 @@ class TenantPortfolioService:
                 country=pos.country,
                 exchange=pos.exchange,
                 notes="Square Off All",
+                fx_rates=fx_rates,
             )
             closed_count += 1
         return {"status": "SUCCESS", "closed_count": closed_count, "message": f"Squared off {closed_count} position(s)."}
+
+    @classmethod
+    def reverse_position(
+        cls,
+        db: Session,
+        user_id: str,
+        position_id: str,
+        live_price: float,
+        fx_rates: Optional[Dict[str, float]] = None,
+    ) -> dict:
+        """Atomically closes an open position and opens the reverse side of equal quantity at live market price."""
+        pos = db.scalar(
+            select(PositionModel).where(PositionModel.id == position_id, PositionModel.user_id == user_id)
+        )
+        if not pos:
+            raise ValueError("Position not found")
+        px = float(live_price or pos.current_price or pos.avg_entry_price)
+        if px <= 0:
+            raise ValueError("Valid live quote unavailable for position reversal")
+        qty = _r_qty(float(pos.qty))
+        close_side = "SELL" if pos.side == "BUY" else "BUY"
+        prod = pos.product_type or "DELIVERY"
+        if pos.side == "BUY" and prod == "DELIVERY":
+            # Spot/Delivery cannot enter naked short in Delivery unless converted to Intraday/Perp or allowed on Margin/Crypto/FX
+            prod = "INTRADAY"
+        cls._execute_fill(
+            db=db,
+            user_id=user_id,
+            symbol=pos.symbol,
+            name=pos.name,
+            currency=pos.currency,
+            quantity=qty,
+            side=close_side,
+            exec_price=px,
+            product_type=pos.product_type or "DELIVERY",
+            order_mode="MARKET",
+            country=pos.country,
+            exchange=pos.exchange,
+            notes="Flip Close Leg",
+            fx_rates=fx_rates,
+        )
+        open_res = cls._execute_fill(
+            db=db,
+            user_id=user_id,
+            symbol=pos.symbol,
+            name=pos.name,
+            currency=pos.currency,
+            quantity=qty,
+            side=close_side,
+            exec_price=px,
+            product_type=prod,
+            order_mode="MARKET",
+            country=pos.country,
+            exchange=pos.exchange,
+            notes=f"Reversed to {'SHORT' if close_side == 'SELL' else 'LONG'}",
+            fx_rates=fx_rates,
+        )
+        return {"status": "REVERSED", "symbol": pos.symbol, "new_side": close_side, "quantity": qty, **open_res}
+
+    @classmethod
+    def compute_portfolio_risk_analytics(
+        cls,
+        db: Session,
+        user_id: str,
+        price_map: Dict[str, dict],
+        fx_rates: Optional[Dict[str, float]] = None,
+    ) -> dict:
+        """Computes Institutional Risk Metrics: Profit Factor, Expectancy, Max Drawdown %, Portfolio Heat %, & Exposure."""
+        closed = db.scalars(
+            select(ClosedTradeModel).where(ClosedTradeModel.user_id == user_id).order_by(ClosedTradeModel.closed_at.asc())
+        ).all()
+        pos_rows = db.scalars(select(PositionModel).where(PositionModel.user_id == user_id)).all()
+        wallets = cls._ensure_wallets(db, user_id)
+
+        rates = fx_rates or {"USD": 1.0, "EUR": 0.94, "GBP": 0.79, "JPY": 152.0, "INR": 84.5, "CAD": 1.40, "CNY": 7.25}
+        def _to_usd(val: float, curr: str) -> float:
+            c = curr or "USD"
+            if c == "GBp":
+                return (val / 100.0) / rates.get("GBP", 0.79)
+            if c == "USD":
+                return val
+            return val / rates.get(c, 1.0)
+
+        wins_usd: List[float] = []
+        losses_usd: List[float] = []
+        cum_usd = 0.0
+        peak_usd = 0.0
+        max_dd_usd = 0.0
+        for ct in closed:
+            net_u = _to_usd(float(ct.net_pnl or 0.0), ct.currency)
+            cum_usd += net_u
+            peak_usd = max(peak_usd, cum_usd)
+            max_dd_usd = max(max_dd_usd, peak_usd - cum_usd)
+            if net_u >= 0:
+                wins_usd.append(net_u)
+            else:
+                losses_usd.append(abs(net_u))
+
+        gross_win = sum(wins_usd)
+        gross_loss = sum(losses_usd)
+        profit_factor = round(gross_win / gross_loss, 2) if gross_loss > 0 else (99.0 if gross_win > 0 else 0.0)
+        total_closed = len(closed)
+        avg_win = (gross_win / len(wins_usd)) if wins_usd else 0.0
+        avg_loss = (gross_loss / len(losses_usd)) if losses_usd else 0.0
+        payoff_ratio = round(avg_win / avg_loss, 2) if avg_loss > 0 else (99.0 if avg_win > 0 else 0.0)
+        win_prob = (len(wins_usd) / total_closed) if total_closed > 0 else 0.0
+        expectancy_usd = round((win_prob * avg_win) - ((1.0 - win_prob) * avg_loss), 2)
+
+        total_wallet_usd = 0.0
+        total_margin_usd = 0.0
+        for c, w in wallets.items():
+            total_wallet_usd += _to_usd(float(w.balance or 0.0), c)
+            total_margin_usd += _to_usd(float(w.margin_used or 0.0), c)
+
+        max_dd_pct = round((max_dd_usd / max(1.0, total_wallet_usd + total_margin_usd)) * 100.0, 2)
+
+        long_exp_usd = 0.0
+        short_exp_usd = 0.0
+        risk_at_sl_usd = 0.0
+        by_hub: Dict[str, float] = {}
+        for p in pos_rows:
+            q = price_map.get(p.symbol)
+            cur_px = float(q["price"]) if q and q.get("price", 0) > 0 else float(p.current_price or p.avg_entry_price)
+            fx_scale = compute_fx_quote_to_settle(p.symbol, p.currency, cur_px, rates)
+            notional_curr = cur_px * float(p.qty) * fx_scale
+            notional_usd = _to_usd(notional_curr, p.currency)
+            hub = p.country or "USA"
+            by_hub[hub] = round(by_hub.get(hub, 0.0) + notional_usd, 2)
+            if p.side == "BUY":
+                long_exp_usd += notional_usd
+            else:
+                short_exp_usd += notional_usd
+            if p.stop_loss and p.stop_loss > 0:
+                sl_dist = max(0.0, (cur_px - float(p.stop_loss)) if p.side == "BUY" else (float(p.stop_loss) - cur_px))
+                risk_at_sl_usd += _to_usd(sl_dist * float(p.qty) * fx_scale, p.currency)
+
+        total_equity_usd = max(1.0, total_wallet_usd + total_margin_usd)
+        portfolio_heat_pct = round((risk_at_sl_usd / total_equity_usd) * 100.0, 2)
+        margin_util_pct = round((total_margin_usd / total_equity_usd) * 100.0, 2)
+
+        return {
+            "total_equity_usd": round(total_equity_usd, 2),
+            "free_cash_usd": round(total_wallet_usd, 2),
+            "margin_used_usd": round(total_margin_usd, 2),
+            "margin_utilization_pct": margin_util_pct,
+            "portfolio_heat_pct": portfolio_heat_pct,
+            "risk_at_sl_usd": round(risk_at_sl_usd, 2),
+            "long_exposure_usd": round(long_exp_usd, 2),
+            "short_exposure_usd": round(short_exp_usd, 2),
+            "net_exposure_usd": round(long_exp_usd - short_exp_usd, 2),
+            "gross_exposure_usd": round(long_exp_usd + short_exp_usd, 2),
+            "closed_trades_count": total_closed,
+            "win_rate_pct": round(win_prob * 100.0, 1),
+            "profit_factor": profit_factor,
+            "payoff_ratio": payoff_ratio,
+            "expectancy_usd": expectancy_usd,
+            "realized_pnl_usd": round(cum_usd, 2),
+            "max_drawdown_pct": max_dd_pct,
+            "exposure_by_hub_usd": by_hub,
+        }
 
     @classmethod
     def reset_user_portfolio(cls, db: Session, user_id: str, country: Optional[str] = None) -> None:
@@ -1187,7 +1404,12 @@ class TenantPortfolioService:
         )
 
     @classmethod
-    def evaluate_all_pending_and_stops(cls, db: Session, price_map: Dict[str, dict]) -> List[dict]:
+    def evaluate_all_pending_and_stops(
+        cls,
+        db: Session,
+        price_map: Dict[str, dict],
+        fx_rates: Optional[Dict[str, float]] = None,
+    ) -> List[dict]:
         """Evaluates pending Limit/Stop orders, Trailing SL ratchets, and active SL/TP triggers safely per user_id."""
         events: List[dict] = []
         pending_rows = db.scalars(select(OrderModel).where(OrderModel.status == "PENDING")).all()
@@ -1225,6 +1447,7 @@ class TenantPortfolioService:
                         exchange=pnd.exchange,
                         notes=pnd.notes or f"{pnd.order_mode} Triggered",
                         existing_order=pnd,
+                        fx_rates=fx_rates,
                     )
                     events.append({"user_id": pnd.user_id, "type": "ORDER_FILL", **res})
                 except Exception as exc:
@@ -1256,16 +1479,16 @@ class TenantPortfolioService:
                     if pos.side == "BUY":
                         hi = max(float(pos.highest_price or pos.avg_entry_price), px)
                         if pos.highest_price != hi:
-                            pos.highest_price = round(hi, 4)
-                        trail_sl = round(hi - pos.trailing_sl, 4)
+                            pos.highest_price = _r_px(hi, pos.symbol)
+                        trail_sl = _r_px(hi - pos.trailing_sl, pos.symbol)
                         if pos.stop_loss is None or trail_sl > pos.stop_loss:
                             pos.stop_loss = trail_sl
                             db.commit()
                     else:
                         lo = min(float(pos.lowest_price or pos.avg_entry_price), px)
                         if pos.lowest_price != lo:
-                            pos.lowest_price = round(lo, 4)
-                        trail_sl = round(lo + pos.trailing_sl, 4)
+                            pos.lowest_price = _r_px(lo, pos.symbol)
+                        trail_sl = _r_px(lo + pos.trailing_sl, pos.symbol)
                         if pos.stop_loss is None or trail_sl < pos.stop_loss:
                             pos.stop_loss = trail_sl
                             db.commit()
@@ -1287,6 +1510,7 @@ class TenantPortfolioService:
                         country=pos.country,
                         exchange=pos.exchange,
                         notes=reason,
+                        fx_rates=fx_rates,
                     )
                     events.append({"user_id": pos.user_id, "type": "ORDER_FILL", **res})
                 elif pos.side == "SHORT" and ((sl is not None and px >= sl) or (tp is not None and px <= tp)):
@@ -1305,6 +1529,7 @@ class TenantPortfolioService:
                         country=pos.country,
                         exchange=pos.exchange,
                         notes=reason,
+                        fx_rates=fx_rates,
                     )
                     events.append({"user_id": pos.user_id, "type": "ORDER_FILL", **res})
             except Exception:
@@ -1452,13 +1677,16 @@ def _ensure_seed_trade_ideas(db: Session, price_map: Dict[str, dict]) -> None:
 
     def _px(sym: str, fallback: float) -> float:
         q = price_map.get(sym)
-        return round(float(q["price"]), 2) if q and q.get("price", 0) > 0 else fallback
+        raw = float(q["price"]) if q and q.get("price", 0) > 0 else fallback
+        return _r_px(raw, sym)
 
     seeds = [
         ("RELIANCE.NS", "Reliance Industries Ltd", "IND", "INR", "BULLISH", "INTRADAY", _px("RELIANCE.NS", 1380.0), 1.03, 0.985, "15m", "Breakout above VWAP + strong refining volume support. Targeting 3% intraday swing.", "Arjun Mehta"),
         ("TCS.NS", "Tata Consultancy Services", "IND", "INR", "BULLISH", "DELIVERY", _px("TCS.NS", 3850.0), 1.06, 0.97, "1D", "Accumulating near 20-EMA support ahead of quarterly IT deal wins.", "Priya Nair"),
         ("NVDA", "NVIDIA Corporation", "USA", "USD", "BULLISH", "INTRADAY", _px("NVDA", 142.0), 1.045, 0.975, "1h", "Momentum continuation above prior session high with strong AI server demand.", "Marcus Vance"),
         ("AAPL", "Apple Inc", "USA", "USD", "BEARISH", "INTRADAY", _px("AAPL", 235.0), 0.97, 1.015, "15m", "Rejection at upper Bollinger Band with bearish RSI divergence.", "Elena Rostova"),
+        ("BTC-USD", "Bitcoin (BTC-USD)", "CRYPTO", "USD", "BULLISH", "DELIVERY", _px("BTC-USD", 62000.0), 1.055, 0.97, "4h", "Reclaiming 4h VWAP + rising spot accumulation across major Binance Spot/Perp venues.", "Satoshi Desk"),
+        ("EURUSD=X", "EUR/USD Major Pair", "FOREX", "USD", "BULLISH", "INTRADAY", _px("EURUSD=X", 1.0950), 1.012, 0.992, "1h", "Holding higher London session low with ECB/Fed spread compression support.", "Clara Hoffman"),
         ("SHOP.TO", "Shopify Inc", "CANADA", "CAD", "BULLISH", "DELIVERY", _px("SHOP.TO", 148.0), 1.07, 0.96, "1D", "TSX tech leader holding higher lows with expanding gross margins.", "Liam O'Connor"),
         ("600519.SS", "Kweichow Moutai", "CHINA", "CNY", "BULLISH", "DELIVERY", _px("600519.SS", 1520.0), 1.05, 0.97, "1D", "SSE consumer staple rebound from multi-week value area low.", "Wei Chen"),
         ("ASML.AS", "ASML Holding N.V.", "EU", "EUR", "BULLISH", "DELIVERY", _px("ASML.AS", 710.0), 1.06, 0.97, "1D", "Euronext lithography leader bouncing off 50-DMA demand zone.", "Lukas Weber"),
@@ -1476,8 +1704,8 @@ def _ensure_seed_trade_ideas(db: Session, price_map: Dict[str, dict]) -> None:
                 direction=dirn,
                 product_type=prod,
                 entry_price=px,
-                target_price=round(px * tgt_m, 2),
-                stop_loss=round(px * sl_m, 2),
+                target_price=_r_px(px * tgt_m, sym),
+                stop_loss=_r_px(px * sl_m, sym),
                 timeframe=tf,
                 thesis=thesis,
                 likes_count=12,
@@ -1509,11 +1737,11 @@ def list_trade_ideas(db: Session, price_map: Dict[str, dict], country: Optional[
             "currency": r.currency,
             "direction": r.direction,
             "product_type": r.product_type,
-            "entry_price": round(float(r.entry_price), 2),
-            "current_price": round(cur_px, 2),
+            "entry_price": _r_px(float(r.entry_price), r.symbol),
+            "current_price": _r_px(cur_px, r.symbol),
             "change_since_idea_pct": chg_from_entry,
-            "target_price": r.target_price,
-            "stop_loss": r.stop_loss,
+            "target_price": _r_px(float(r.target_price), r.symbol) if r.target_price else None,
+            "stop_loss": _r_px(float(r.stop_loss), r.symbol) if r.stop_loss else None,
             "timeframe": r.timeframe,
             "thesis": r.thesis,
             "likes_count": r.likes_count,
@@ -1549,9 +1777,9 @@ def create_trade_idea(
         currency=currency,
         direction=direction.upper(),
         product_type=product_type.upper(),
-        entry_price=round(float(entry_price), 4),
-        target_price=round(float(target_price), 4) if target_price else None,
-        stop_loss=round(float(stop_loss), 4) if stop_loss else None,
+        entry_price=_r_px(float(entry_price), symbol),
+        target_price=_r_px(float(target_price), symbol) if target_price else None,
+        stop_loss=_r_px(float(stop_loss), symbol) if stop_loss else None,
         timeframe=timeframe or "1D",
         thesis=thesis.strip()[:1000],
         likes_count=1,

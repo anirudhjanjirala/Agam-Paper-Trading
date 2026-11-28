@@ -38,12 +38,42 @@ export function getCurrencySymbol(currency: string | undefined): string {
   }
 }
 
-export function formatAssetPrice(val: number | undefined | null, currency: string | undefined): string {
+export function getPricePrecision(val: number | undefined | null, symbol?: string): number {
+  if (val === undefined || val === null || isNaN(val) || val === 0) return 2;
+  const ap = Math.abs(val);
+  if (ap < 0.0001) return 8;
+  if (ap < 0.01) return 6;
+  const s = (symbol || "").toUpperCase();
+  if (s.endsWith("=X")) {
+    return ap >= 50 ? 3 : 5;
+  }
+  if (ap < 10) return 4;
+  return 2;
+}
+
+export function formatQty(qty: number | undefined | null): string {
+  if (qty === undefined || qty === null || isNaN(qty)) return "0";
+  const roundedInt = Math.round(qty);
+  if (Math.abs(qty - roundedInt) < 1e-7) {
+    return formatNumber(roundedInt, 0, 0);
+  }
+  return Number(qty).toLocaleString("en-US", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 6,
+  });
+}
+
+export function formatAssetPrice(val: number | undefined | null, currency: string | undefined, symbol?: string): string {
   if (val === undefined || val === null || isNaN(val)) return "--";
-  const decimals = val !== 0 && Math.abs(val) < 10 ? 4 : 2;
+  const decimals = getPricePrecision(val, symbol);
   const formatted = formatNumber(val, decimals, decimals);
   if (currency === "PERCENT") return `${formatted}%`;
   if (currency === "GBp") return `${formatted}p`;
+  const symU = (symbol || "").toUpperCase().trim();
+  if (symU.endsWith("=X") && !symU.includes("INR")) {
+    const qCcy = symU.length >= 8 ? symU.slice(3, 6) : "FX";
+    return `${formatted} ${qCcy}`;
+  }
   return `${getCurrencySymbol(currency)}${formatted}`;
 }
 

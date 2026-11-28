@@ -22,6 +22,8 @@ REGION_CURRENCY: Dict[str, str] = {
     "CANADA": "CAD",
     "CHINA": "CNY",
     "EU": "EUR",
+    "CRYPTO": "USD",
+    "FOREX": "USD",
 }
 
 
@@ -141,7 +143,12 @@ class GlobalUniverseStore:
         with self._lock:
             base_lf = self.df.lazy()
             if region and region != "ALL":
-                base_lf = base_lf.filter(pl.col("region") == region)
+                if region == "FOREX":
+                    base_lf = base_lf.filter((pl.col("region") == "FOREX") | (pl.col("category") == "forex"))
+                elif region == "CRYPTO":
+                    base_lf = base_lf.filter((pl.col("region") == "CRYPTO") | (pl.col("category") == "crypto"))
+                else:
+                    base_lf = base_lf.filter(pl.col("region") == region)
             if category and category != "all":
                 base_lf = base_lf.filter(pl.col("category") == category)
 
@@ -195,21 +202,40 @@ class GlobalUniverseStore:
         self,
         region: Optional[str] = None,
         category: Optional[str] = None,
+        tier: Optional[str] = None,
         offset: int = 0,
         limit: int = 50,
     ) -> dict:
         with self._lock:
             lf = self.df.lazy()
             if region and region != "ALL":
-                lf = lf.filter(pl.col("region") == region)
+                if region == "FOREX":
+                    lf = lf.filter((pl.col("region") == "FOREX") | (pl.col("category") == "forex"))
+                elif region == "CRYPTO":
+                    lf = lf.filter((pl.col("region") == "CRYPTO") | (pl.col("category") == "crypto"))
+                else:
+                    lf = lf.filter(pl.col("region") == region)
             if category and category != "all":
                 lf = lf.filter(pl.col("category") == category)
+            if tier and tier != "all":
+                t_up = tier.upper()
+                lf = lf.filter(pl.col("isin").str.to_uppercase().str.contains(t_up, literal=True))
 
             total = lf.select(pl.len()).collect().item()
             items = (
-                lf.with_columns((pl.col("price") > 0).alias("_has_px"))
-                .sort(["_has_px", "volume"], descending=[True, True])
-                .drop("_has_px")
+                lf.with_columns(
+                    (pl.col("price") > 0).alias("_has_px"),
+                    pl.when(pl.col("isin").is_in(["FX_MAJOR", "CRYPTO_MAJOR"]))
+                    .then(3)
+                    .when(pl.col("isin").is_in(["FX_MINOR", "CRYPTO_L1", "CRYPTO_DEFI"]))
+                    .then(2)
+                    .when(pl.col("isin").is_in(["FX_EXOTIC", "CRYPTO_MEME"]))
+                    .then(1)
+                    .otherwise(0)
+                    .alias("_tier_rank"),
+                )
+                .sort(["_tier_rank", "_has_px", "volume"], descending=[True, True, True])
+                .drop(["_has_px", "_tier_rank"])
                 .slice(offset, limit)
                 .collect()
                 .to_dicts()
@@ -503,14 +529,31 @@ class GlobalUniverseStore:
             {"symbol": "CL=F", "name": "WTI Crude Oil Futures", "exchange": "NYMEX", "category": "commodities"},
             {"symbol": "BZ=F", "name": "Brent Crude Oil Futures", "exchange": "ICE", "category": "commodities"},
             {"symbol": "NG=F", "name": "Natural Gas Futures", "exchange": "NYMEX", "category": "commodities"},
+            {"symbol": "HO=F", "name": "Heating Oil Futures", "exchange": "NYMEX", "category": "commodities"},
+            {"symbol": "RB=F", "name": "RBOB Gasoline Futures", "exchange": "NYMEX", "category": "commodities"},
+            {"symbol": "PA=F", "name": "Palladium Futures (NYMEX)", "exchange": "NYMEX", "category": "commodities"},
             {"symbol": "ZC=F", "name": "Corn Futures (CBOT)", "exchange": "CBOT", "category": "commodities"},
             {"symbol": "ZW=F", "name": "Wheat Futures (CBOT)", "exchange": "CBOT", "category": "commodities"},
             {"symbol": "ZS=F", "name": "Soybean Futures (CBOT)", "exchange": "CBOT", "category": "commodities"},
+            {"symbol": "KC=F", "name": "Coffee Futures (ICE)", "exchange": "ICE", "category": "commodities"},
+            {"symbol": "SB=F", "name": "Sugar #11 Futures (ICE)", "exchange": "ICE", "category": "commodities"},
+            {"symbol": "CT=F", "name": "Cotton Futures (ICE)", "exchange": "ICE", "category": "commodities"},
+            {"symbol": "CC=F", "name": "Cocoa Futures (ICE)", "exchange": "ICE", "category": "commodities"},
+            {"symbol": "LE=F", "name": "Live Cattle Futures (CME)", "exchange": "CME", "category": "commodities"},
             {"symbol": "^TNX", "name": "US 10-Yr Treasury Yield", "exchange": "UST", "category": "bonds"},
             {"symbol": "^TYX", "name": "US 30-Yr Treasury Yield", "exchange": "UST", "category": "bonds"},
             {"symbol": "^FVX", "name": "US 5-Yr Treasury Yield", "exchange": "UST", "category": "bonds"},
+            {"symbol": "^IRX", "name": "US 13-Wk T-Bill Yield", "exchange": "UST", "category": "bonds"},
             {"symbol": "ZN=F", "name": "10-Yr US Treasury Note Futures", "exchange": "CBOT", "category": "bonds"},
             {"symbol": "ZB=F", "name": "30-Yr US Treasury Bond Futures", "exchange": "CBOT", "category": "bonds"},
+            {"symbol": "ZF=F", "name": "5-Yr US Treasury Note Futures", "exchange": "CBOT", "category": "bonds"},
+            {"symbol": "ZT=F", "name": "2-Yr US Treasury Note Futures", "exchange": "CBOT", "category": "bonds"},
+            {"symbol": "^N225", "name": "Nikkei 225 Index (Japan)", "exchange": "TSE", "category": "indices"},
+            {"symbol": "^HSI", "name": "Hang Seng Index (Hong Kong)", "exchange": "HKEX", "category": "indices"},
+            {"symbol": "^KS11", "name": "KOSPI Composite Index (Korea)", "exchange": "KRX", "category": "indices"},
+            {"symbol": "^AXJO", "name": "S&P/ASX 200 Index (Australia)", "exchange": "ASX", "category": "indices"},
+            {"symbol": "^STI", "name": "Straits Times Index (Singapore)", "exchange": "SGX", "category": "indices"},
+            {"symbol": "^BVSP", "name": "IBOVESPA Index (Brazil)", "exchange": "B3", "category": "indices"},
             {"symbol": "SHY", "name": "iShares 1-3 Year Treasury Bond ETF", "exchange": "NASDAQ", "category": "bonds"},
             {"symbol": "IEF", "name": "iShares 7-10 Year Treasury Bond ETF", "exchange": "NASDAQ", "category": "bonds"},
             {"symbol": "TLT", "name": "iShares 20+ Year Treasury Bond ETF", "exchange": "NASDAQ", "category": "bonds"},
@@ -519,19 +562,6 @@ class GlobalUniverseStore:
             {"symbol": "HYG", "name": "iShares High Yield Corp Bond", "exchange": "NYSE", "category": "bonds"},
             {"symbol": "TIP", "name": "iShares TIPS Inflation-Linked Bond ETF", "exchange": "NYSE", "category": "bonds"},
         ]
-        # Dynamic global FX currency pairs pulled from Frankfurter ECB feed
-        try:
-            rfx = httpx.get("https://api.frankfurter.dev/v1/currencies", timeout=8.0)
-            if rfx.status_code == 200 and isinstance(rfx.json(), dict):
-                for cur, cname in rfx.json().items():
-                    if cur == "USD":
-                        continue
-                    pair = f"{cur}USD=X" if cur in ("EUR", "GBP", "AUD", "NZD") else f"USD{cur}=X"
-                    label = f"{cur}/USD" if cur in ("EUR", "GBP", "AUD", "NZD") else f"USD/{cur}"
-                    usa_macro.append({"symbol": pair, "name": f"{label} ({cname})", "exchange": "FOREX", "category": "forex"})
-        except Exception:
-            for pair, label in [("EURUSD=X", "EUR/USD"), ("GBPUSD=X", "GBP/USD"), ("USDJPY=X", "USD/JPY"), ("USDCHF=X", "USD/CHF"), ("AUDUSD=X", "AUD/USD")]:
-                usa_macro.append({"symbol": pair, "name": f"{label} Currency Pair", "exchange": "FOREX", "category": "forex"})
         for b in usa_macro:
             records.append({
                 "symbol": b["symbol"], "name": b["name"], "region": "USA", "exchange": b["exchange"],
@@ -581,7 +611,6 @@ class GlobalUniverseStore:
             {"symbol": "XGD.TO", "name": "iShares S&P/TSX Global Gold ETF", "exchange": "TSX", "category": "commodities"},
             {"symbol": "XBB.TO", "name": "iShares Core Canadian Universe Bond", "exchange": "TSX", "category": "bonds"},
             {"symbol": "ZAG.TO", "name": "BMO Aggregate Bond Index ETF", "exchange": "TSX", "category": "bonds"},
-            {"symbol": "USDCAD=X", "name": "USD/CAD Currency Pair", "exchange": "FOREX", "category": "forex"},
         ]
         for b in ca_benchmarks:
             records.append({
@@ -607,7 +636,6 @@ class GlobalUniverseStore:
             {"symbol": "511010.SS", "name": "Guotai SSE 5-Yr CGB China Govt Bond ETF", "exchange": "SSE", "category": "bonds"},
             {"symbol": "511260.SS", "name": "Guotai SSE 10-Yr CGB China Govt Bond ETF", "exchange": "SSE", "category": "bonds"},
             {"symbol": "518880.SS", "name": "HuaAn Gold ETF (SGE Commodity Proxy)", "exchange": "SSE", "category": "commodities"},
-            {"symbol": "USDCNY=X", "name": "USD/CNY Offshore/Onshore FX", "exchange": "FOREX", "category": "forex"},
         ]
         base_records = [
             {
@@ -916,16 +944,21 @@ class GlobalUniverseStore:
             {"symbol": "^GDAXI", "name": "DAX Performance Index", "exchange": "XETRA", "category": "indices", "currency": "EUR"},
             {"symbol": "^FTSE", "name": "FTSE 100 Index", "exchange": "LSE", "category": "indices", "currency": "GBP"},
             {"symbol": "^FCHI", "name": "CAC 40 Index", "exchange": "Euronext", "category": "indices", "currency": "EUR"},
+            {"symbol": "^STOXX50E", "name": "EURO STOXX 50 Index", "exchange": "Euronext", "category": "indices", "currency": "EUR"},
+            {"symbol": "^SSMI", "name": "Swiss Market Index (SMI)", "exchange": "SIX", "category": "indices", "currency": "CHF"},
+            {"symbol": "^IBEX", "name": "IBEX 35 Index (Spain)", "exchange": "BME", "category": "indices", "currency": "EUR"},
             {"symbol": "SHEL.L", "name": "Shell plc (LSE)", "exchange": "LSE", "category": "stocks", "currency": "GBp"},
             {"symbol": "AZN.L", "name": "AstraZeneca plc (LSE)", "exchange": "LSE", "category": "stocks", "currency": "GBp"},
             {"symbol": "HSBA.L", "name": "HSBC Holdings plc (LSE)", "exchange": "LSE", "category": "stocks", "currency": "GBp"},
+            {"symbol": "NESN.SW", "name": "Nestle S.A. (Zurich)", "exchange": "SIX", "category": "stocks", "currency": "EUR"},
+            {"symbol": "ROG.SW", "name": "Roche Holding AG (Zurich)", "exchange": "SIX", "category": "stocks", "currency": "EUR"},
+            {"symbol": "NOVN.SW", "name": "Novartis AG (Zurich)", "exchange": "SIX", "category": "stocks", "currency": "EUR"},
+            {"symbol": "UBSG.SW", "name": "UBS Group AG (Zurich)", "exchange": "SIX", "category": "stocks", "currency": "EUR"},
             {"symbol": "CSPX.L", "name": "iShares Core S&P 500 UCITS ETF", "exchange": "LSE", "category": "etfs", "currency": "USD"},
             {"symbol": "EXS1.DE", "name": "iShares Core DAX UCITS ETF", "exchange": "XETRA", "category": "etfs", "currency": "EUR"},
             {"symbol": "IGLN.L", "name": "iShares Physical Gold ETC (Commodities)", "exchange": "LSE", "category": "commodities", "currency": "USD"},
             {"symbol": "IGLT.L", "name": "iShares Core UK Gilts Bond ETF", "exchange": "LSE", "category": "bonds", "currency": "GBp"},
             {"symbol": "EUNH.DE", "name": "iShares Core Euro Govt Bond ETF", "exchange": "XETRA", "category": "bonds", "currency": "EUR"},
-            {"symbol": "EURUSD=X", "name": "EUR/USD Currency Pair", "exchange": "FOREX", "category": "forex", "currency": "USD"},
-            {"symbol": "GBPUSD=X", "name": "GBP/USD Currency Pair", "exchange": "FOREX", "category": "forex", "currency": "USD"},
         ]
         for b in eu_benchmarks:
             records.append({
@@ -933,6 +966,226 @@ class GlobalUniverseStore:
                 "category": b["category"], "currency": b["currency"], "isin": "",
                 "price": 0.0, "prev_close": 0.0, "change": 0.0, "change_percent": 0.0, "volume": 0, "rsi_14": 50.0, "as_of": "",
             })
+
+        self._upsert_records(records)
+        return len(records)
+
+    def ingest_crypto_complete(self) -> int:
+        """Ingests the complete live Crypto spot universe (Binance 24h + CoinGecko top 500 names & rank)."""
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        major_bases = {"BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "AVAX", "TRX", "TON", "DOT", "LINK", "LTC", "BCH", "SUI", "APT", "NEAR", "XLM"}
+        l1_bases = {"ATOM", "ALGO", "ICP", "HBAR", "ARB", "OP", "MATIC", "POL", "FIL", "VET", "ETC", "SEI", "TIA", "INJ", "FTM", "STX", "KAS", "MNT"}
+        defi_bases = {"UNI", "AAVE", "MKR", "LDO", "CRV", "SNX", "COMP", "JUP", "RUNE", "ENA", "ONDO", "PENDLE", "TAO", "FET", "RENDER", "RNDR", "GRT", "AR"}
+        meme_bases = {"SHIB", "PEPE", "WIF", "BONK", "FLOKI", "MEME", "BOME", "PENGU", "TRUMP", "NEIRO"}
+
+        def _crypto_tier(base: str) -> str:
+            b = base.upper()
+            if b in major_bases:
+                return "CRYPTO_MAJOR"
+            if b in l1_bases:
+                return "CRYPTO_L1"
+            if b in defi_bases:
+                return "CRYPTO_DEFI"
+            if b in meme_bases:
+                return "CRYPTO_MEME"
+            return "CRYPTO_ALT"
+
+        cg_names: Dict[str, dict] = {}
+        with httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, timeout=10.0, follow_redirects=True) as client:
+            for pg in (1, 2):
+                try:
+                    rg = client.get(
+                        f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={pg}&sparkline=false"
+                    )
+                    if rg.status_code == 200 and isinstance(rg.json(), list):
+                        for item in rg.json():
+                            sym_u = str(item.get("symbol") or "").upper().strip()
+                            if sym_u and sym_u not in cg_names:
+                                cg_names[sym_u] = item
+                except Exception:
+                    pass
+
+            records: List[dict] = []
+            seen_syms: set[str] = set()
+            try:
+                rb = client.get("https://api.binance.com/api/v3/ticker/24hr")
+                if rb.status_code == 200 and isinstance(rb.json(), list):
+                    for row in rb.json():
+                        bsym = str(row.get("symbol") or "").upper()
+                        px = float(row.get("lastPrice") or 0.0)
+                        qvol = float(row.get("quoteVolume") or 0.0)
+                        if px <= 0 or qvol <= 0:
+                            continue
+                        if bsym.endswith("USDT"):
+                            base = bsym[:-4]
+                            norm_sym, curr = f"{base}-USD", "USD"
+                        elif bsym in ("BTCEUR", "ETHEUR", "SOLEUR", "BNBEUR", "XRPEUR", "ADAEUR", "DOGEEUR", "LTCEUR"):
+                            base = bsym[:-3]
+                            norm_sym, curr = f"{base}-EUR", "EUR"
+                        elif bsym in ("ETHBTC", "SOLBTC", "BNBBTC", "XRPBTC", "ADABTC", "DOGEBTC", "LINKBTC"):
+                            base = bsym[:-3]
+                            norm_sym, curr = f"{base}-BTC", "USD"
+                        else:
+                            continue
+                        if norm_sym in seen_syms:
+                            continue
+                        seen_syms.add(norm_sym)
+                        cg = cg_names.get(base)
+                        cname = f"{cg['name']} ({norm_sym})" if cg and cg.get("name") else f"{base} / {norm_sym.split('-')[1]}"
+                        pc = float(row.get("prevClosePrice") or px)
+                        chg = float(row.get("priceChange") or (px - pc))
+                        pct = float(row.get("priceChangePercent") or 0.0)
+                        records.append({
+                            "symbol": norm_sym,
+                            "name": cname,
+                            "region": "CRYPTO",
+                            "exchange": "BINANCE",
+                            "category": "crypto",
+                            "currency": curr,
+                            "isin": _crypto_tier(base),
+                            "price": px,
+                            "prev_close": pc,
+                            "change": chg,
+                            "change_percent": round(pct, 2),
+                            "volume": int(qvol),
+                            "rsi_14": 50.0,
+                            "as_of": now_str,
+                        })
+            except Exception as e:
+                print("Binance Crypto ingest err:", e)
+
+            # Merge any top CoinGecko coin not already added from Binance
+            for sym_u, cg in cg_names.items():
+                norm_sym = f"{sym_u}-USD"
+                if norm_sym in seen_syms or sym_u in ("USDT", "USDC", "DAI", "TUSD", "USDE", "FDUSD"):
+                    continue
+                px = float(cg.get("current_price") or 0.0)
+                if px <= 0:
+                    continue
+                seen_syms.add(norm_sym)
+                pct = float(cg.get("price_change_percentage_24h") or 0.0)
+                pc = px / (1.0 + pct / 100.0) if pct > -99 else px
+                records.append({
+                    "symbol": norm_sym,
+                    "name": f"{cg.get('name') or sym_u} ({norm_sym})",
+                    "region": "CRYPTO",
+                    "exchange": "COINGECKO",
+                    "category": "crypto",
+                    "currency": "USD",
+                    "isin": _crypto_tier(sym_u),
+                    "price": px,
+                    "prev_close": pc,
+                    "change": px - pc,
+                    "change_percent": round(pct, 2),
+                    "volume": int(float(cg.get("total_volume") or 0.0)),
+                    "rsi_14": 50.0,
+                    "as_of": now_str,
+                })
+
+        self._upsert_records(records)
+        return len(records)
+
+    def ingest_forex_complete(self) -> int:
+        """Ingests the complete Global Forex matrix (Majors, Minors/Crosses, Exotics + DXY) with live ECB cross pricing."""
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        curr_names: Dict[str, str] = {}
+        usd_rates: Dict[str, float] = {"USD": 1.0}
+        with httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, timeout=10.0) as client:
+            try:
+                rc = client.get("https://api.frankfurter.dev/v1/currencies")
+                if rc.status_code == 200 and isinstance(rc.json(), dict):
+                    curr_names = {str(k).upper(): str(v) for k, v in rc.json().items()}
+                rl = client.get("https://api.frankfurter.dev/v1/latest?base=USD")
+                if rl.status_code == 200:
+                    rates = (rl.json() or {}).get("rates") or {}
+                    for k, v in rates.items():
+                        if isinstance(v, (int, float)) and v > 0:
+                            usd_rates[str(k).upper()] = float(v)
+            except Exception as e:
+                print("Frankfurter FX ingest err:", e)
+
+        majors = [
+            ("EUR", "USD"), ("GBP", "USD"), ("USD", "JPY"), ("USD", "CHF"),
+            ("USD", "CAD"), ("AUD", "USD"), ("NZD", "USD"),
+        ]
+        minors = [
+            ("EUR", "GBP"), ("EUR", "JPY"), ("GBP", "JPY"), ("EUR", "CHF"), ("EUR", "CAD"),
+            ("EUR", "AUD"), ("EUR", "NZD"), ("GBP", "AUD"), ("GBP", "CAD"), ("GBP", "CHF"),
+            ("GBP", "NZD"), ("AUD", "JPY"), ("AUD", "CAD"), ("AUD", "CHF"), ("AUD", "NZD"),
+            ("CAD", "JPY"), ("CAD", "CHF"), ("CHF", "JPY"), ("NZD", "JPY"), ("NZD", "CAD"),
+            ("NZD", "CHF"),
+        ]
+        exotics: List[tuple[str, str]] = [
+            ("USD", "INR"), ("EUR", "INR"), ("GBP", "INR"), ("JPY", "INR"), ("AUD", "INR"), ("CAD", "INR"), ("CHF", "INR"),
+            ("USD", "CNY"), ("EUR", "CNY"), ("GBP", "CNY"), ("CNY", "JPY"),
+            ("USD", "SGD"), ("USD", "HKD"), ("USD", "KRW"), ("USD", "MXN"), ("USD", "ZAR"), ("USD", "TRY"),
+            ("USD", "SEK"), ("USD", "NOK"), ("USD", "DKK"), ("USD", "PLN"), ("USD", "BRL"), ("USD", "IDR"),
+            ("USD", "MYR"), ("USD", "PHP"), ("USD", "THB"), ("USD", "ILS"), ("USD", "CZK"), ("USD", "HUF"),
+            ("EUR", "SEK"), ("EUR", "NOK"), ("EUR", "PLN"), ("EUR", "TRY"), ("EUR", "SGD"), ("EUR", "ZAR"),
+            ("GBP", "ZAR"), ("GBP", "SGD"), ("GBP", "TRY"), ("SGD", "JPY"), ("ZAR", "JPY"), ("MXN", "JPY"), ("TRY", "JPY"),
+        ]
+        for cur in sorted(usd_rates.keys()):
+            if cur in ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"):
+                continue
+            if ( "USD", cur) not in exotics:
+                exotics.append(("USD", cur))
+
+        def _reg_for_pair(b: str, q: str) -> tuple[str, str, str]:
+            if q == "INR":
+                return "IND", "NSE-FX", "INR"
+            return "FOREX", "FOREX", "USD"
+
+        records: List[dict] = []
+        seen: set[str] = set()
+        for tier, pairs in (("FX_MAJOR", majors), ("FX_MINOR", minors), ("FX_EXOTIC", exotics)):
+            for idx_p, (b, q) in enumerate(pairs):
+                sym = f"{b}{q}=X"
+                if sym in seen:
+                    continue
+                seen.add(sym)
+                reg, exch_name, settle_curr = _reg_for_pair(b, q)
+                px = 0.0
+                if b in usd_rates and q in usd_rates and usd_rates[b] > 0:
+                    raw_px = usd_rates[q] / usd_rates[b]
+                    px = round(raw_px, 3 if (q == "JPY" or raw_px >= 50) else 5)
+                b_name = curr_names.get(b, b)
+                q_name = curr_names.get(q, q)
+                tier_lbl = "Major" if tier == "FX_MAJOR" else "Minor" if tier == "FX_MINOR" else "Exotic"
+                vol_weight = 10_000_000 - idx_p * 1000 if tier == "FX_MAJOR" else (4_000_000 - idx_p * 1000 if tier == "FX_MINOR" else 500_000 - idx_p * 100)
+                records.append({
+                    "symbol": sym,
+                    "name": f"{b}/{q} ({tier_lbl} · {b_name} / {q_name})",
+                    "region": reg,
+                    "exchange": exch_name,
+                    "category": "forex",
+                    "currency": settle_curr,
+                    "isin": tier,
+                    "price": px,
+                    "prev_close": px,
+                    "change": 0.0,
+                    "change_percent": 0.0,
+                    "volume": max(1000, vol_weight),
+                    "rsi_14": 50.0,
+                    "as_of": now_str,
+                })
+
+        # Add US Dollar Index (DXY) to FOREX hub
+        records.append({
+            "symbol": "DX-Y.NYB",
+            "name": "US Dollar Index (DXY Spot)",
+            "region": "FOREX",
+            "exchange": "ICE",
+            "category": "forex",
+            "currency": "USD",
+            "isin": "FX_MAJOR",
+            "price": 0.0,
+            "prev_close": 0.0,
+            "change": 0.0,
+            "change_percent": 0.0,
+            "volume": 20_000_000,
+            "rsi_14": 50.0,
+            "as_of": now_str,
+        })
 
         self._upsert_records(records)
         return len(records)
@@ -945,6 +1198,8 @@ class GlobalUniverseStore:
             threading.Thread(target=lambda: results.update({"CANADA": self.ingest_canada_complete()}), daemon=True),
             threading.Thread(target=lambda: results.update({"CHINA": self.ingest_china_complete()}), daemon=True),
             threading.Thread(target=lambda: results.update({"EU": self.ingest_eu_complete()}), daemon=True),
+            threading.Thread(target=lambda: results.update({"CRYPTO": self.ingest_crypto_complete()}), daemon=True),
+            threading.Thread(target=lambda: results.update({"FOREX": self.ingest_forex_complete()}), daemon=True),
         ]
         for t in threads:
             t.start()

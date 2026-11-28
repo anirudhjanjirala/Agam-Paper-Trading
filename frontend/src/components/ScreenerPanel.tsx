@@ -63,34 +63,40 @@ export default function ScreenerPanel({
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(apiUrl("/api/screener/scan"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        region: "ALL",
-        category: "all",
-        only_priced: true,
-        rsi_max: null,
-        change_pct_min: null,
-        sort_by: "volume",
-        descending: true,
-        limit: 60,
-      }),
-    })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((d) => {
-        if (!controller.signal.aborted && d) {
-          setScanMeta({ scanned: d.scanned_universe, matched: d.matched_count, ms: d.scan_ms });
-          setResults(d.results);
-          setLoading(false);
-        }
+    const timer = setTimeout(() => {
+      setLoading(true);
+      fetch(apiUrl("/api/screener/scan"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          region,
+          category,
+          only_priced: onlyPriced,
+          rsi_max: rsiMax ? parseFloat(rsiMax) : null,
+          change_pct_min: chgMin ? parseFloat(chgMin) : null,
+          sort_by: "volume",
+          descending: true,
+          limit: 60,
+        }),
       })
-      .catch(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, []);
+        .then((res) => (res.ok ? res.json() : null))
+        .then((d) => {
+          if (!controller.signal.aborted && d) {
+            setScanMeta({ scanned: d.scanned_universe, matched: d.matched_count, ms: d.scan_ms });
+            setResults(d.results);
+            setLoading(false);
+          }
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) setLoading(false);
+        });
+    }, 120);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [region, category, onlyPriced, rsiMax, chgMin]);
 
   return (
     <div className="bg-[#FFFFFF] border border-[#E0E3EB] rounded-2xl p-5 shadow-sm space-y-4">
@@ -108,7 +114,7 @@ export default function ScreenerPanel({
                 </span>
               )}
             </h3>
-            <p className="text-xs text-[#787B86]">Apache Arrow / Polars vectorized scan across IND, USA, CANADA, CHINA & EU</p>
+            <p className="text-xs text-[#787B86]">Apache Arrow / Polars vectorized scan across IND, USA, CANADA, CHINA, EU, CRYPTO &amp; FOREX</p>
           </div>
         </div>
 
@@ -122,6 +128,38 @@ export default function ScreenerPanel({
         </button>
       </div>
 
+      <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-[#787B86] mr-1">Pro Presets:</span>
+        <button
+          type="button"
+          onClick={() => { setRegion("CRYPTO"); setCategory("crypto"); setOnlyPriced(true); setRsiMax(""); setChgMin("2"); }}
+          className="px-2.5 py-1 rounded-full bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 font-semibold hover:bg-amber-100 transition cursor-pointer"
+        >
+          Crypto 24h Movers (+2%)
+        </button>
+        <button
+          type="button"
+          onClick={() => { setRegion("FOREX"); setCategory("forex"); setOnlyPriced(true); setRsiMax(""); setChgMin(""); }}
+          className="px-2.5 py-1 rounded-full bg-teal-50 dark:bg-teal-900/20 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800 font-semibold hover:bg-teal-100 transition cursor-pointer"
+        >
+          Global FX Pairs
+        </button>
+        <button
+          type="button"
+          onClick={() => { setOnlyPriced(true); setRsiMax("35"); setChgMin(""); }}
+          className="px-2.5 py-1 rounded-full bg-[#F8F9FD] dark:bg-slate-800 text-[#131722] dark:text-slate-200 border border-[#E0E3EB] dark:border-slate-700 font-semibold hover:bg-[#EFF2F7] transition cursor-pointer"
+        >
+          Oversold (RSI &lt; 35)
+        </button>
+        <button
+          type="button"
+          onClick={() => { setRegion("ALL"); setCategory("all"); setOnlyPriced(true); setRsiMax(""); setChgMin(""); }}
+          className="px-2.5 py-1 rounded-full bg-[#F8F9FD] dark:bg-slate-800 text-[#131722] dark:text-slate-200 border border-[#E0E3EB] dark:border-slate-700 font-semibold hover:bg-[#EFF2F7] transition cursor-pointer"
+        >
+          All 7 Markets Top Vol
+        </button>
+      </div>
+
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 text-xs">
         <select
           aria-label="Screener Region"
@@ -129,12 +167,14 @@ export default function ScreenerPanel({
           onChange={(e) => setRegion(e.target.value)}
           className="bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl px-3 py-2 text-[#131722] font-semibold outline-none min-w-0"
         >
-          <option value="ALL">All 5 Regions</option>
+          <option value="ALL">All 7 Regions &amp; Asset Hubs</option>
+          <option value="CRYPTO">Crypto (24/7 Spot &amp; Perps)</option>
+          <option value="FOREX">Forex (Majors/Minors/Exotics)</option>
           <option value="IND">India (NSE/BSE)</option>
           <option value="USA">USA (NASDAQ/NYSE)</option>
           <option value="CANADA">Canada (TSX/TSXV)</option>
           <option value="CHINA">China (SSE/SZSE)</option>
-          <option value="EU">Europe & UK</option>
+          <option value="EU">Europe &amp; UK</option>
         </select>
 
         <select
@@ -144,12 +184,13 @@ export default function ScreenerPanel({
           className="bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl px-3 py-2 text-[#131722] font-semibold outline-none min-w-0"
         >
           <option value="all">All Asset Classes</option>
+          <option value="crypto">Cryptocurrencies</option>
+          <option value="forex">Forex &amp; Currencies</option>
           <option value="stocks">Equities / Stocks</option>
           <option value="etfs">ETFs</option>
-          <option value="bonds">Bonds & Yields</option>
+          <option value="bonds">Bonds &amp; Yields</option>
           <option value="indices">Indices</option>
-          <option value="commodities">Futures & Commodities</option>
-          <option value="forex">Forex & Currencies</option>
+          <option value="commodities">Futures &amp; Commodities</option>
         </select>
 
         <input
@@ -200,12 +241,12 @@ export default function ScreenerPanel({
                   <span className="font-mono font-bold text-[#131722] block">{r.symbol}</span>
                   <span className="text-[11px] text-[#787B86] truncate max-w-[200px] block">{r.name}</span>
                 </td>
-                <td className="py-2.5 px-3 font-mono text-[#131722]">
+                <td className="py-2.5 px-3 font-mono text-[#131722] whitespace-nowrap">
                   {r.region} • <span className="text-[#787B86]">{r.exchange}</span>
                 </td>
                 <td className="py-2.5 px-3 uppercase text-[10px] font-bold text-[#2962FF]">{r.category}</td>
                 <td className="py-2.5 px-3 text-right font-mono font-bold text-[#131722]">
-                  {r.price > 0 ? formatAssetPrice(r.price, r.currency) : "--"}
+                  {r.price > 0 ? formatAssetPrice(r.price, r.currency, r.symbol) : "--"}
                 </td>
                 <td className={`py-2.5 px-3 text-right font-mono font-bold ${r.change_percent >= 0 ? "text-[#089981]" : "text-[#F23645]"}`}>
                   {r.change_percent >= 0 ? "+" : ""}{r.change_percent.toFixed(2)}%

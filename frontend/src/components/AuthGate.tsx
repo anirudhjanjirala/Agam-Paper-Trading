@@ -136,7 +136,7 @@ export default function AuthGate() {
                 <div>
                   <div className="font-bold text-white">Asset-Specific Global Taxes &amp; Audit</div>
                   <div className="text-[11px] text-slate-400">
-                    Automatic statutory fees tailored by country &amp; asset class (Stocks, ETFs, Commodities MCX/CME, Forex, Bonds) plus full local SQLite audit trail.
+                    Automatic statutory fees tailored across Equities, ETFs, Commodities (MCX/CME), Crypto 24/7, Forex 24/5 &amp; Bonds plus full local SQLite audit trail.
                   </div>
                 </div>
               </div>

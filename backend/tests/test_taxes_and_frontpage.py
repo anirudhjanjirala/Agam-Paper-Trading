@@ -264,10 +264,321 @@ def test_middleware_multi_user_profiles_no_reset_and_trading() -> None:
             assert expected in actions_seen, f"Missing activity audit log action: {expected}"
 
 
+def test_crypto_and_forex_complete_market():
+    """Verify Crypto & Forex fee models, USD FX settlement, precision, screener, sessions, and fractional HTTP orders."""
+    import uuid
+    from core.tax_brokerage import (
+        calculate_order_charges,
+        compute_fx_quote_to_settle,
+        infer_country_and_sub,
+    )
+    from core.screener_engine import ScreenerQuery, run_columnar_scan
+    from engine.google_finance import is_forex_symbol, smart_price_decimals
+    from main import UNIVERSE, app, app
+
+    # 1. Precision & classification helpers
+    assert smart_price_decimals(0.0000185, is_forex_symbol("SHIB-USD")) == 8
+    assert smart_price_decimals(1.08543, is_forex_symbol("EURUSD=X")) == 5
+    assert smart_price_decimals(150.123, is_forex_symbol("USDJPY=X")) == 3
+    assert smart_price_decimals(92450.25, is_forex_symbol("BTC-USD")) == 2
+
+    c_country, c_sub, c_exch = infer_country_and_sub("BTC-USD", region="CRYPTO", exchange="BINANCE", currency="USD")
+    assert c_country == "CRYPTO" and c_sub == "CRYPTO_EXCHANGE" and c_exch == "BINANCE", (c_country, c_sub, c_exch)
+    f_country, f_sub, f_exch = infer_country_and_sub("USDJPY=X", region="FOREX", exchange="FX", currency="USD")
+    assert f_country == "FOREX" and f_sub == "FX_OTC" and f_exch == "FX", (f_country, f_sub, f_exch)
+    eu_fx_c, eu_fx_s, _ = infer_country_and_sub("EURUSD=X", region="EU", exchange="FOREX", currency="USD")
+    assert eu_fx_c == "FOREX" and eu_fx_s == "FX_OTC", (eu_fx_c, eu_fx_s)
+    us_fx_c, us_fx_s, _ = infer_country_and_sub("USDJPY=X", region="USA", exchange="FOREX", currency="USD")
+    assert us_fx_c == "FOREX" and us_fx_s == "FX_OTC", (us_fx_c, us_fx_s)
+
+    # 2. FX Quote -> Settlement conversion
+    jpy_scale = compute_fx_quote_to_settle("USDJPY=X", "USD", 150.0, {"JPY": 150.0})
+    assert abs(jpy_scale - (1.0 / 150.0)) < 1e-6, f"Unexpected USDJPY scale: {jpy_scale}"
+    assert abs(compute_fx_quote_to_settle("EURUSD=X", "USD", 1.085, {}) - 1.0) < 1e-6
+
+    # 3. Micro-cap Crypto breakeven precision & Spot/Perp fees
+    shib_bd = calculate_order_charges(
+        symbol="SHIB-USD",
+        quantity=5_000_000,
+        price=0.0000185,
+        side="BUY",
+        product_type="DELIVERY",
+        broker_plan="DISCOUNT",
+        region="CRYPTO",
+        exchange="BINANCE",
+        currency="USD",
+        category="crypto",
+    )
+    assert shib_bd.currency == "USD"
+    assert shib_bd.breakeven_delta > 0 and shib_bd.breakeven_delta < 0.0000185
+
+    btc_perp_bd = calculate_order_charges(
+        symbol="BTC-USD",
+        quantity=0.5,
+        price=90000.0,
+        side="BUY",
+        product_type="FUTURES",
+        broker_plan="PRO",
+        region="CRYPTO",
+        exchange="BINANCE",
+        currency="USD",
+        category="crypto",
+    )
+    assert abs(btc_perp_bd.leverage - 20.0) < 1e-6
+    assert abs(btc_perp_bd.margin_required - 2250.0) < 1.0
+
+    # 4. Forex notional conversion in USD (10,000 USDJPY @ 150 -> $10k notional, $500 20x margin, NOT 1.5M JPY)
+    fx_bd = calculate_order_charges(
+        symbol="USDJPY=X",
+        quantity=10_000,
+        price=150.0,
+        side="BUY",
+        product_type="INTRADAY",
+        broker_plan="DISCOUNT",
+        region="FOREX",
+        exchange="FX",
+        currency="USD",
+        category="forex",
+        fx_quote_to_settle=jpy_scale,
+    )
+    assert fx_bd.currency == "USD"
+    assert abs(fx_bd.notional - 10_000.0) < 1.0, f"FX notional should be ~$10,000 USD, got {fx_bd.notional}"
+    assert abs(fx_bd.margin_required - 500.0) < 1.0, f"FX 20x margin should be ~$500 USD, got {fx_bd.margin_required}"
+    assert fx_bd.total_charges == 0.0
+
+    fx_pro = calculate_order_charges(
+        symbol="USDJPY=X",
+        quantity=10_000,
+        price=150.0,
+        side="BUY",
+        product_type="INTRADAY",
+        broker_plan="PRO",
+        region="FOREX",
+        exchange="FX",
+        currency="USD",
+        category="forex",
+        fx_quote_to_settle=jpy_scale,
+    )
+    assert 0.30 <= fx_pro.total_charges <= 1.0, f"Unexpected FX PRO USD charges: {fx_pro.total_charges}"
+
+    # 5. FastAPI endpoints, screener & fractional Crypto + Forex margin order execution
+    with TestClient(app) as client:
+        # Ensure BTC-USD & USDJPY=X exist deterministically in UNIVERSE even if offline
+        seed_if_missing = []
+        if not UNIVERSE.get_by_symbol("BTC-USD"):
+            seed_if_missing.append({
+                "symbol": "BTC-USD", "name": "Bitcoin / USD", "region": "CRYPTO",
+                "exchange": "BINANCE", "category": "crypto", "currency": "USD",
+                "isin": "CRYPTO_MAJOR", "price": 88000.0, "prev_close": 86000.0,
+                "change": 2000.0, "change_percent": 2.33, "volume": 2_000_000_000.0,
+                "rsi_14": 58.0, "as_of": "2026-11-28 00:00",
+            })
+        usdjpy_meta = UNIVERSE.get_by_symbol("USDJPY=X")
+        if not usdjpy_meta or usdjpy_meta.get("region") != "FOREX":
+            seed_if_missing.append({
+                "symbol": "USDJPY=X", "name": "USD / JPY", "region": "FOREX",
+                "exchange": "FOREX", "category": "forex", "currency": "USD",
+                "isin": "FX_MAJOR", "price": 150.0, "prev_close": 149.5,
+                "change": 0.5, "change_percent": 0.33, "volume": 10_000_000.0,
+                "rsi_14": 52.0, "as_of": "2026-11-28 00:00",
+            })
+        if seed_if_missing:
+            UNIVERSE._upsert_records(seed_if_missing)
+
+        crypto_hits = run_columnar_scan(UNIVERSE, ScreenerQuery(region="CRYPTO", category="crypto", only_priced=False, limit=20))["results"]
+        assert any(r["symbol"] == "BTC-USD" for r in crypto_hits)
+        forex_hits = run_columnar_scan(UNIVERSE, ScreenerQuery(region="FOREX", category="forex", only_priced=False, limit=20))["results"]
+        assert any(r["symbol"] == "USDJPY=X" for r in forex_hits)
+
+        sess = client.get("/api/sessions").json()
+        assert "CRYPTO" in sess and sess["CRYPTO"]["open"] is True and sess["CRYPTO"]["status"] == "24/7 LIVE"
+        assert "FOREX" in sess
+
+        rates = client.get("/api/charges/schedules").json()
+        assert "CRYPTO" in rates["countries"] and "FOREX" in rates["countries"]
+
+        prev = client.post("/api/charges/preview", json={
+            "symbol": "BTC-USD", "quantity": 0.025, "price": 88000.0,
+            "order_type": "BUY", "product_type": "DELIVERY", "broker_plan": "DISCOUNT", "category": "crypto",
+        })
+        assert prev.status_code == 200 and prev.json()["currency"] == "USD"
+
+        email = f"cryptofx_{uuid.uuid4().hex[:8]}@example.com"
+        su = client.post("/api/auth/register", json={
+            "display_name": "CryptoFX Pro", "email": email, "password": "StrongPassword123!", "accepted_disclaimer": True,
+        })
+        assert su.status_code in (200, 201), su.text
+
+        # Place fractional 0.025 BTC BUY
+        b_res = client.post("/api/orders/place", json={
+            "symbol": "BTC-USD", "quantity": 0.025, "order_type": "BUY",
+            "order_mode": "MARKET", "product_type": "DELIVERY", "price": 88000.0,
+        })
+        assert b_res.status_code == 200, b_res.text
+
+        # Partial sell 0.01 BTC
+        s_res = client.post("/api/orders/place", json={
+            "symbol": "BTC-USD", "quantity": 0.01, "order_type": "SELL",
+            "order_mode": "MARKET", "product_type": "DELIVERY", "price": 90000.0,
+        })
+        assert s_res.status_code == 200, s_res.text
+
+        port = client.get("/api/portfolio").json()
+        btc_pos = [p for p in port["positions"] if p["symbol"] == "BTC-USD"]
+        assert len(btc_pos) == 1 and abs(btc_pos[0]["quantity"] - 0.015) < 1e-6, btc_pos
+
+        # Test FOREX mini lot (10000 USDJPY=X @ 20x INTRADAY) + square off all
+        fx_res = client.post("/api/orders/place", json={
+            "symbol": "USDJPY=X", "quantity": 10000, "order_type": "BUY",
+            "order_mode": "MARKET", "product_type": "INTRADAY", "price": 150.0,
+        })
+        assert fx_res.status_code == 200, fx_res.text
+        sq = client.post("/api/positions/square-off-all", json={})
+        assert sq.status_code == 200 and sq.json()["closed_count"] >= 2
+
+
+def test_advanced_institutional_features():
+    """Verify micro-cap/FX quant precision, Bar Replay shorting & fractions, Backtester, Technicals, Ladder, Position Reverse & Risk Matrix."""
+    import uuid
+    from core.quant_engine import (
+        compute_expected_move,
+        compute_technical_scorecard,
+        compute_tpo_profile,
+        compute_volume_footprint,
+        compute_volume_profile,
+        run_strategy_backtest,
+    )
+    from core.replay_engine import IsolatedReplayEngine
+    from core.tick_aggregator import Tick, TickAggregator, _price_bucket
+    from main import UNIVERSE, app
+
+    # 1. Micro-cap Crypto & FX precision across Quant & TickAggregator
+    shib_bars = [
+        {
+            "time": f"2026-10-{i + 1:02d}",
+            "open": 0.000018 + i * 1e-7,
+            "high": 0.0000188 + i * 1e-7,
+            "low": 0.0000175 + i * 1e-7,
+            "close": 0.0000184 + i * 1e-7,
+            "volume": 1_000_000 + i * 50_000,
+        }
+        for i in range(40)
+    ]
+    vp = compute_volume_profile(shib_bars)
+    assert 0.0 < vp["poc"] < 0.0001, vp
+    tpo = compute_tpo_profile(shib_bars)
+    assert 0.0 < tpo["tpo_poc"] < 0.0001, tpo
+    fp = compute_volume_footprint(shib_bars)
+    assert 0.0 < fp[-1]["levels"][0]["price"] < 0.0001, fp[-1]
+    em = compute_expected_move(shib_bars)
+    assert 0.0 < em["upper_1sd"] < 0.0001, em
+
+    assert _price_bucket(0.0000185) > 0.0
+    assert abs(_price_bucket(1.09542) - 1.0955) < 0.001
+
+    ta = TickAggregator()
+    out_ticks = ta.ingest_tick(Tick(symbol="BTC-USD", price=60000.0, size=0.025, ts_ms=1_700_000_000_000), ["1m"])
+    assert abs(out_ticks["1m"].volume - 0.025) < 1e-6
+
+    # 2. Technical Scorecard + Pivot Points + Vectorized Strategy Backtester
+    trend_bars = [
+        {
+            "time": f"2026-09-{i + 1:02d}",
+            "open": 100.0 + i * 0.6,
+            "high": 102.0 + i * 0.65,
+            "low": 99.0 + i * 0.55,
+            "close": 101.0 + i * 0.62,
+            "volume": 50000 + i * 1000,
+        }
+        for i in range(60)
+    ]
+    sc = compute_technical_scorecard(trend_bars)
+    assert sc["rating"] in ("BUY", "STRONG BUY", "NEUTRAL", "SELL", "STRONG SELL")
+    assert sc["pivots"]["classic"]["R1"] > sc["pivots"]["classic"]["P"] > sc["pivots"]["classic"]["S1"]
+
+    for strat in ("ema_cross", "supertrend", "rsi_reversion", "macd_momentum", "bb_breakout"):
+        bt = run_strategy_backtest(trend_bars, strategy=strat, initial_capital=100000.0, fee_bps=5.0)
+        assert "total_return_pct" in bt and bt["bars_tested"] == 60
+        assert len(bt["equity_curve"]) == 60
+
+    # 3. Replay Engine: Fractional BTC + SHORT selling + Cover + FX scaling
+    re_eng = IsolatedReplayEngine()
+    sess = re_eng.start_session("EURUSD=X", "1d", "USD", [
+        {"time": f"2026-11-{i + 1:02d}", "open": 1.09, "high": 1.10, "low": 1.08, "close": 1.09 + (i * 0.0005)}
+        for i in range(25)
+    ], start_ratio=0.6, initial_cash=100000.0, fx_scale=1.0)
+    snap = re_eng.place_isolated_trade(sess.session_id, "SELL", 10000.0).snapshot()
+    assert snap["isolated_wallet"]["position_qty"] == -10000.0
+    assert 1.0 < snap["isolated_wallet"]["avg_entry_price"] < 1.2
+    re_eng.step(sess.session_id, 2)
+    snap2 = re_eng.place_isolated_trade(sess.session_id, "BUY", 10000.0).snapshot()
+    assert snap2["isolated_wallet"]["position_qty"] == 0.0
+    assert snap2["isolated_wallet"]["closed_trades"] == 1
+
+    # 4. Live HTTP endpoints: Ladder Orders, Pending FX Modify scaling, Position Flip, Risk Analytics, Technicals, Backtest
+    with TestClient(app) as client:
+        # Ensure starter BTC-USD / USDJPY=X present in case offline
+        if not UNIVERSE.get_by_symbol("BTC-USD"):
+            UNIVERSE._upsert_records([{
+                "symbol": "BTC-USD", "name": "Bitcoin / USD", "region": "CRYPTO",
+                "exchange": "BINANCE", "category": "crypto", "currency": "USD",
+                "isin": "CRYPTO_MAJOR", "price": 88000.0, "prev_close": 86000.0,
+                "change": 2000.0, "change_percent": 2.33, "volume": 2_000_000_000.0,
+                "rsi_14": 58.0, "as_of": "2026-11-28 00:00",
+            }])
+
+        email = f"inst_{uuid.uuid4().hex[:8]}@example.com"
+        su = client.post("/api/auth/register", json={
+            "display_name": "Quant Desk", "email": email, "password": "StrongPassword123!", "accepted_disclaimer": True,
+        })
+        assert su.status_code in (200, 201), su.text
+
+        # Scaled Limit Ladder Order on USDJPY=X (4 staggered rungs) + FX modify check
+        lad = client.post("/api/orders/ladder", json={
+            "symbol": "USDJPY=X", "total_quantity": 20000, "order_type": "BUY",
+            "product_type": "INTRADAY", "price_start": 140.0, "price_end": 134.0, "rungs": 4,
+        })
+        assert lad.status_code == 200 and lad.json()["rungs_placed"] == 4, lad.text
+
+        port1 = client.get("/api/portfolio").json()
+        pend = [o for o in port1["pending_orders"] if o["symbol"] == "USDJPY=X"]
+        assert len(pend) == 4
+        mod = client.patch(f"/api/orders/{pend[0]['id']}", json={"limit_price": 139.0, "quantity": 5000})
+        assert mod.status_code == 200
+        # Scaled USD notional (~$5000, not 695,000 JPY!)
+        assert mod.json()["order"]["gross_amount"] < 10000.0, mod.json()["order"]
+
+        # Place BUY on BTC-USD then Flip -> SHORT atomically
+        buy_btc = client.post("/api/orders/place", json={
+            "symbol": "BTC-USD", "quantity": 0.02, "order_type": "BUY",
+            "order_mode": "MARKET", "product_type": "INTRADAY", "stop_loss": 80000.0,
+        })
+        assert buy_btc.status_code == 200, buy_btc.text
+        pos_id = client.get("/api/portfolio").json()["positions"][0]["id"]
+
+        ra = client.get("/api/portfolio/risk-analytics")
+        assert ra.status_code == 200 and "portfolio_heat_pct" in ra.json() and ra.json()["total_equity_usd"] > 0
+
+        flip = client.post(f"/api/positions/{pos_id}/reverse")
+        assert flip.status_code == 200 and flip.json()["new_side"] == "SELL", flip.text
+        port2 = client.get("/api/portfolio").json()
+        assert len(port2["positions"]) == 1 and port2["positions"][0]["order_type"] == "SHORT"
+
+        tech = client.get("/api/asset/BTC-USD/technicals?interval=1d&period=3mo")
+        assert tech.status_code == 200 and "pivots" in tech.json() and "mtf" in tech.json()
+
+        bt_api = client.post("/api/backtest", json={"symbol": "BTC-USD", "strategy": "supertrend", "interval": "1d", "period": "6mo"})
+        assert bt_api.status_code == 200 and "sharpe_ratio" in bt_api.json()
+
+        client.post("/api/positions/square-off-all", json={})
+
+
 if __name__ == "__main__":
     try:
         test_country_and_asset_class_tax_and_brokerage()
         test_middleware_multi_user_profiles_no_reset_and_trading()
+        test_crypto_and_forex_complete_market()
+        test_advanced_institutional_features()
         print("ALL QA TESTS PASSED!")
     finally:
         try:

@@ -65,6 +65,21 @@ INDICATOR_CATALOG: List[dict] = [
 ]
 
 
+def _px_round(val: float, ref_px: Optional[float] = None) -> float:
+    ap = abs(float(ref_px if ref_px is not None else val or 0.0))
+    if ap <= 0:
+        return round(float(val), 4)
+    if ap < 0.0001:
+        return round(float(val), 8)
+    if ap < 0.01:
+        return round(float(val), 6)
+    if ap < 10.0:
+        return round(float(val), 5)
+    if ap < 500.0:
+        return round(float(val), 3)
+    return round(float(val), 2)
+
+
 def _sma(arr: np.ndarray, period: int) -> np.ndarray:
     out = np.full(len(arr), np.nan, dtype=float)
     if period <= 0 or len(arr) < period:
@@ -196,19 +211,24 @@ def compute_indicator(
     if fn == "supertrend":
         atr = compute_indicator("atr", close, h, l, o, v, period)
         hl2 = 0.5 * (h + l)
-        upper = hl2 + mult * atr
-        lower = hl2 - mult * atr
-        st = np.copy(close)
+        basic_upper = hl2 + mult * atr
+        basic_lower = hl2 - mult * atr
+        final_upper = np.copy(basic_upper)
+        final_lower = np.copy(basic_lower)
+        st = np.full(n, np.nan, dtype=float)
         dir_up = True
         for i in range(1, n):
             if np.isnan(atr[i]):
-                st[i] = np.nan
                 continue
-            if close[i] > upper[i - 1]:
-                dir_up = True
-            elif close[i] < lower[i - 1]:
+            prev_fu = final_upper[i - 1] if not np.isnan(final_upper[i - 1]) else basic_upper[i]
+            prev_fl = final_lower[i - 1] if not np.isnan(final_lower[i - 1]) else basic_lower[i]
+            final_upper[i] = basic_upper[i] if (basic_upper[i] < prev_fu or close[i - 1] > prev_fu) else prev_fu
+            final_lower[i] = basic_lower[i] if (basic_lower[i] > prev_fl or close[i - 1] < prev_fl) else prev_fl
+            if dir_up and close[i] < final_lower[i]:
                 dir_up = False
-            st[i] = lower[i] if dir_up else upper[i]
+            elif not dir_up and close[i] > final_upper[i]:
+                dir_up = True
+            st[i] = final_lower[i] if dir_up else final_upper[i]
         return st
     if fn == "psar":
         psar = np.copy(close)
@@ -411,10 +431,12 @@ def compute_chained_indicator(bars: List[dict], chain: List[dict]) -> List[dict]
             # Subsequent stages feed the previous indicator's output series into the next calculation
             current = compute_indicator(fn, current, current, current, current, volume, period, mult)
 
+    ref_px = float(np.median(close)) if len(close) else 100.0
+    is_osc = chain[-1].get("fn", "").lower() in {"rsi", "stoch_k", "stoch_d", "stoch_rsi", "cci", "willr", "roc", "cmf", "adx", "natr", "hv"}
     output = []
     for bar, val in zip(bars, current):
         if not np.isnan(val):
-            output.append({"time": bar["time"], "value": round(float(val), 4)})
+            output.append({"time": bar["time"], "value": round(float(val), 4) if is_osc else _px_round(float(val), ref_px)})
     return output
 
 
@@ -456,13 +478,13 @@ def compute_expected_move(bars: List[dict], horizon_bars: int = 10) -> dict:
     move_1sd = last_px * sigma_per_bar * math.sqrt(horizon_bars)
     move_2sd = 2.0 * move_1sd
     return {
-        "anchor_price": round(last_px, 4),
+        "anchor_price": _px_round(last_px, last_px),
         "horizon_bars": horizon_bars,
         "sigma_per_bar_pct": round(sigma_per_bar * 100.0, 3),
-        "upper_1sd": round(last_px + move_1sd, 4),
-        "lower_1sd": round(last_px - move_1sd, 4),
-        "upper_2sd": round(last_px + move_2sd, 4),
-        "lower_2sd": round(last_px - move_2sd, 4),
+        "upper_1sd": _px_round(last_px + move_1sd, last_px),
+        "lower_1sd": _px_round(last_px - move_1sd, last_px),
+        "upper_2sd": _px_round(last_px + move_2sd, last_px),
+        "lower_2sd": _px_round(last_px - move_2sd, last_px),
     }
 
 
@@ -477,11 +499,11 @@ def compute_volume_profile(bars: List[dict], num_bins: int = 24) -> dict:
     lo = min(b["low"] for b in bars)
     hi = max(b["high"] for b in bars)
     if hi <= lo:
-        hi = lo + 1.0
+        hi = lo + max(abs(lo) * 0.002, 1e-8)
     step = (hi - lo) / num_bins
 
     buckets = [
-        {"price_low": round(lo + i * step, 4), "price_high": round(lo + (i + 1) * step, 4), "price_mid": round(lo + (i + 0.5) * step, 4), "buy_vol": 0, "sell_vol": 0, "total_vol": 0}
+        {"price_low": _px_round(lo + i * step, lo), "price_high": _px_round(lo + (i + 1) * step, lo), "price_mid": _px_round(lo + (i + 0.5) * step, lo), "buy_vol": 0, "sell_vol": 0, "total_vol": 0}
         for i in range(num_bins)
     ]
 
@@ -536,10 +558,10 @@ def compute_tpo_profile(bars: List[dict], num_bins: int = 20) -> dict:
     lo = min(b["low"] for b in recent)
     hi = max(b["high"] for b in recent)
     if hi <= lo:
-        hi = lo + 1.0
+        hi = lo + max(abs(lo) * 0.002, 1e-8)
     step = (hi - lo) / num_bins
 
-    rows = [{"price": round(lo + (i + 0.5) * step, 4), "letters": "", "tpo_count": 0} for i in range(num_bins)]
+    rows = [{"price": _px_round(lo + (i + 0.5) * step, lo), "letters": "", "tpo_count": 0} for i in range(num_bins)]
     letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
     for b_idx, b in enumerate(recent):
@@ -557,8 +579,8 @@ def compute_tpo_profile(bars: List[dict], num_bins: int = 20) -> dict:
 
     return {
         "tpo_poc": poc_row["price"],
-        "ib_high": round(ib_high, 4),
-        "ib_low": round(ib_low, 4),
+        "ib_high": _px_round(ib_high, lo),
+        "ib_low": _px_round(ib_low, lo),
         "rows": list(reversed(rows)),
     }
 
@@ -576,14 +598,14 @@ def compute_volume_footprint(bars: List[dict], levels_per_bar: int = 6) -> List[
         vol = max(int(b.get("volume", 0)), 100)
         lo, hi = b["low"], b["high"]
         if hi <= lo:
-            hi = lo + 0.05
+            hi = lo + max(abs(lo) * 0.002, 1e-8)
         step = (hi - lo) / levels_per_bar
         is_bull = b["close"] >= b["open"]
 
         levels = []
         bar_delta = 0
         for lvl_i in range(levels_per_bar):
-            px = round(lo + (lvl_i + 0.5) * step, 4)
+            px = _px_round(lo + (lvl_i + 0.5) * step, lo or 1.0)
             # Distribute volume weighted toward close; Lee-Ready directional tilt
             weight = 1.0 + (0.5 if (is_bull and lvl_i >= levels_per_bar // 2) or (not is_bull and lvl_i < levels_per_bar // 2) else 0.0)
             lvl_tot = int((vol / levels_per_bar) * weight)
@@ -614,3 +636,292 @@ def compute_volume_footprint(bars: List[dict], levels_per_bar: int = 6) -> List[
         })
 
     return footprint_bars
+
+
+def compute_technical_scorecard(bars: List[dict]) -> dict:
+    """
+    Institutional Multi-Factor Technical Scorecard:
+    Computes Oscillators + Moving Averages Consensus, Classic & Fibonacci Pivot Points, and ATR/Volatility.
+    """
+    if not bars or len(bars) < 5:
+        return {"rating": "NEUTRAL", "buy": 0, "sell": 0, "neutral": 0, "score": 0.0, "oscillators": [], "moving_averages": [], "pivots": {}}
+
+    close = np.array([b["close"] for b in bars], dtype=float)
+    high = np.array([b["high"] for b in bars], dtype=float)
+    low = np.array([b["low"] for b in bars], dtype=float)
+    open_ = np.array([b["open"] for b in bars], dtype=float)
+    volume = np.array([b.get("volume", 1.0) for b in bars], dtype=float)
+    last_px = float(close[-1])
+
+    def _last(arr: np.ndarray) -> Optional[float]:
+        for v in reversed(arr):
+            if not np.isnan(v):
+                return float(v)
+        return None
+
+    rsi_v = _last(compute_indicator("rsi", close, high, low, open_, volume, 14))
+    stoch_k = _last(compute_indicator("stoch_k", close, high, low, open_, volume, 14))
+    cci_v = _last(compute_indicator("cci", close, high, low, open_, volume, 20))
+    adx_v = _last(compute_indicator("adx", close, high, low, open_, volume, 14))
+    macd_v = _last(compute_indicator("macd", close, high, low, open_, volume, 12))
+    macd_sig = _last(compute_indicator("macd_signal", close, high, low, open_, volume, 12))
+    willr_v = _last(compute_indicator("willr", close, high, low, open_, volume, 14))
+    atr_v = _last(compute_indicator("atr", close, high, low, open_, volume, 14))
+    natr_v = _last(compute_indicator("natr", close, high, low, open_, volume, 14))
+    st_v = _last(compute_indicator("supertrend", close, high, low, open_, volume, 10, 3.0))
+
+    osc_rows: List[dict] = []
+    if rsi_v is not None:
+        sig = "BUY" if rsi_v < 35 else ("SELL" if rsi_v > 68 else "NEUTRAL")
+        osc_rows.append({"name": "RSI (14)", "value": round(rsi_v, 2), "signal": sig})
+    if stoch_k is not None:
+        sig = "BUY" if stoch_k < 25 else ("SELL" if stoch_k > 80 else "NEUTRAL")
+        osc_rows.append({"name": "Stoch %K (14)", "value": round(stoch_k, 2), "signal": sig})
+    if cci_v is not None:
+        sig = "BUY" if cci_v < -100 else ("SELL" if cci_v > 100 else "NEUTRAL")
+        osc_rows.append({"name": "CCI (20)", "value": round(cci_v, 2), "signal": sig})
+    if macd_v is not None and macd_sig is not None:
+        sig = "BUY" if macd_v > macd_sig else ("SELL" if macd_v < macd_sig else "NEUTRAL")
+        osc_rows.append({"name": "MACD (12,26,9)", "value": _px_round(macd_v, last_px), "signal": sig})
+    if willr_v is not None:
+        sig = "BUY" if willr_v < -80 else ("SELL" if willr_v > -20 else "NEUTRAL")
+        osc_rows.append({"name": "Williams %R (14)", "value": round(willr_v, 2), "signal": sig})
+    if adx_v is not None:
+        osc_rows.append({"name": "ADX (14) Trend", "value": round(adx_v, 2), "signal": "NEUTRAL"})
+
+    ma_rows: List[dict] = []
+    for label, fn, p in (("EMA 10", "ema", 10), ("SMA 20", "sma", 20), ("EMA 20", "ema", 20), ("EMA 50", "ema", 50), ("SMA 100", "sma", 100), ("EMA 200", "ema", 200)):
+        mv = _last(compute_indicator(fn, close, high, low, open_, volume, p))
+        if mv is not None:
+            sig = "BUY" if last_px > mv * 1.0005 else ("SELL" if last_px < mv * 0.9995 else "NEUTRAL")
+            ma_rows.append({"name": label, "value": _px_round(mv, last_px), "signal": sig})
+    if st_v is not None:
+        ma_rows.append({"name": "Supertrend (10,3)", "value": _px_round(st_v, last_px), "signal": "BUY" if last_px > st_v else "SELL"})
+
+    all_votes = [r["signal"] for r in (osc_rows + ma_rows)]
+    buy_cnt = sum(1 for v in all_votes if v == "BUY")
+    sell_cnt = sum(1 for v in all_votes if v == "SELL")
+    neut_cnt = sum(1 for v in all_votes if v == "NEUTRAL")
+    total_v = max(1, len(all_votes))
+    score = round((buy_cnt - sell_cnt) / total_v, 2)
+    rating = (
+        "STRONG BUY" if score >= 0.45
+        else "BUY" if score >= 0.15
+        else "STRONG SELL" if score <= -0.45
+        else "SELL" if score <= -0.15
+        else "NEUTRAL"
+    )
+
+    ref_bar = bars[-2] if len(bars) >= 2 else bars[-1]
+    ph, pl_, pc = float(ref_bar["high"]), float(ref_bar["low"]), float(ref_bar["close"])
+    p = (ph + pl_ + pc) / 3.0
+    rng = max(ph - pl_, 1e-9)
+    pivots = {
+        "classic": {
+            "P": _px_round(p, last_px),
+            "R1": _px_round(2 * p - pl_, last_px),
+            "R2": _px_round(p + rng, last_px),
+            "R3": _px_round(ph + 2 * (p - pl_), last_px),
+            "S1": _px_round(2 * p - ph, last_px),
+            "S2": _px_round(p - rng, last_px),
+            "S3": _px_round(pl_ - 2 * (ph - p), last_px),
+        },
+        "fibonacci": {
+            "P": _px_round(p, last_px),
+            "R1": _px_round(p + 0.382 * rng, last_px),
+            "R2": _px_round(p + 0.618 * rng, last_px),
+            "R3": _px_round(p + 1.0 * rng, last_px),
+            "S1": _px_round(p - 0.382 * rng, last_px),
+            "S2": _px_round(p - 0.618 * rng, last_px),
+            "S3": _px_round(p - 1.0 * rng, last_px),
+        },
+    }
+
+    return {
+        "last_price": _px_round(last_px, last_px),
+        "rating": rating,
+        "score": score,
+        "buy": buy_cnt,
+        "sell": sell_cnt,
+        "neutral": neut_cnt,
+        "atr_14": _px_round(atr_v, last_px) if atr_v is not None else 0.0,
+        "volatility_pct": round(natr_v, 2) if natr_v is not None else 0.0,
+        "oscillators": osc_rows,
+        "moving_averages": ma_rows,
+        "pivots": pivots,
+    }
+
+
+def run_strategy_backtest(
+    bars: List[dict],
+    strategy: str = "ema_cross",
+    initial_capital: float = 100000.0,
+    fee_bps: float = 5.0,
+    allow_short: bool = True,
+) -> dict:
+    """
+    Vectorized Multi-Asset Quantitative Strategy Backtester over historical OHLCV bars.
+    Supports EMA Cross, RSI Reversion, Supertrend, MACD Momentum, and Bollinger Breakout.
+    """
+    if not bars or len(bars) < 25:
+        return {"error": "At least 25 historical bars are required to run a backtest."}
+
+    close = np.array([b["close"] for b in bars], dtype=float)
+    high = np.array([b["high"] for b in bars], dtype=float)
+    low = np.array([b["low"] for b in bars], dtype=float)
+    open_ = np.array([b["open"] for b in bars], dtype=float)
+    volume = np.array([b.get("volume", 1.0) for b in bars], dtype=float)
+    n = len(bars)
+    strat = (strategy or "ema_cross").lower().strip()
+
+    desired = np.zeros(n, dtype=int)
+    if strat == "rsi_reversion":
+        r = compute_indicator("rsi", close, high, low, open_, volume, 14)
+        pos = 0
+        for i in range(1, n):
+            if np.isnan(r[i]):
+                continue
+            if r[i] < 32:
+                pos = 1
+            elif r[i] > 68:
+                pos = -1 if allow_short else 0
+            elif pos == 1 and r[i] > 55:
+                pos = 0
+            elif pos == -1 and r[i] < 45:
+                pos = 0
+            desired[i] = pos
+    elif strat == "supertrend":
+        st = compute_indicator("supertrend", close, high, low, open_, volume, 10, 3.0)
+        for i in range(1, n):
+            if not np.isnan(st[i]):
+                desired[i] = 1 if close[i] > st[i] else (-1 if allow_short else 0)
+    elif strat == "macd_momentum":
+        m = compute_indicator("macd", close, high, low, open_, volume, 12)
+        s = compute_indicator("macd_signal", close, high, low, open_, volume, 12)
+        for i in range(1, n):
+            if not np.isnan(m[i]) and not np.isnan(s[i]):
+                desired[i] = 1 if m[i] > s[i] else (-1 if allow_short else 0)
+    elif strat == "bb_breakout":
+        up = compute_indicator("bb_upper", close, high, low, open_, volume, 20, 2.0)
+        dn = compute_indicator("bb_lower", close, high, low, open_, volume, 20, 2.0)
+        mid = compute_indicator("bb_middle", close, high, low, open_, volume, 20, 2.0)
+        pos = 0
+        for i in range(1, n):
+            if np.isnan(up[i]):
+                continue
+            if close[i] > up[i]:
+                pos = 1
+            elif close[i] < dn[i]:
+                pos = -1 if allow_short else 0
+            elif pos == 1 and close[i] < mid[i]:
+                pos = 0
+            elif pos == -1 and close[i] > mid[i]:
+                pos = 0
+            desired[i] = pos
+    else:  # ema_cross (9 / 21)
+        e_fast = compute_indicator("ema", close, high, low, open_, volume, 9)
+        e_slow = compute_indicator("ema", close, high, low, open_, volume, 21)
+        for i in range(1, n):
+            if not np.isnan(e_fast[i]) and not np.isnan(e_slow[i]):
+                desired[i] = 1 if e_fast[i] > e_slow[i] else (-1 if allow_short else 0)
+
+    fee_rate = max(0.0, float(fee_bps)) / 10000.0
+    equity = float(initial_capital)
+    bh_start_px = float(close[0])
+    peak = equity
+    max_dd = 0.0
+    cur_pos = 0
+    entry_px = 0.0
+    entry_time = bars[0]["time"]
+    trades_log: List[dict] = []
+    curve: List[dict] = []
+    daily_rets: List[float] = []
+
+    for i in range(n):
+        px = float(close[i])
+        bar_t = bars[i]["time"]
+        if i > 0 and cur_pos != 0 and close[i - 1] > 0:
+            r_bar = ((px - close[i - 1]) / close[i - 1]) * cur_pos
+            prev_eq = equity
+            equity *= (1.0 + r_bar)
+            daily_rets.append((equity - prev_eq) / max(prev_eq, 1e-9))
+        else:
+            daily_rets.append(0.0)
+
+        target_pos = int(desired[i])
+        if target_pos != cur_pos:
+            if cur_pos != 0:
+                gross_ret = ((px - entry_px) / max(entry_px, 1e-9)) * cur_pos
+                net_ret = gross_ret - (2.0 * fee_rate)
+                pnl_amt = equity * net_ret / max(1.0 + gross_ret, 1e-9)
+                equity *= (1.0 - fee_rate)
+                trades_log.append({
+                    "side": "LONG" if cur_pos > 0 else "SHORT",
+                    "entry_time": entry_time,
+                    "exit_time": bar_t,
+                    "entry_price": _px_round(entry_px, px),
+                    "exit_price": _px_round(px, px),
+                    "return_pct": round(net_ret * 100.0, 2),
+                    "pnl": round(pnl_amt, 2),
+                })
+            if target_pos != 0:
+                equity *= (1.0 - fee_rate)
+                entry_px = px
+                entry_time = bar_t
+            cur_pos = target_pos
+
+        peak = max(peak, equity)
+        dd_pct = ((peak - equity) / peak) * 100.0 if peak > 0 else 0.0
+        max_dd = max(max_dd, dd_pct)
+        bh_eq = initial_capital * (px / bh_start_px) if bh_start_px > 0 else initial_capital
+        curve.append({
+            "time": bar_t,
+            "strategy_equity": round(equity, 2),
+            "benchmark_equity": round(bh_eq, 2),
+        })
+
+    if cur_pos != 0:
+        px = float(close[-1])
+        gross_ret = ((px - entry_px) / max(entry_px, 1e-9)) * cur_pos
+        net_ret = gross_ret - (2.0 * fee_rate)
+        pnl_amt = equity * net_ret / max(1.0 + gross_ret, 1e-9)
+        trades_log.append({
+            "side": "LONG" if cur_pos > 0 else "SHORT",
+            "entry_time": entry_time,
+            "exit_time": bars[-1]["time"],
+            "entry_price": _px_round(entry_px, px),
+            "exit_price": _px_round(px, px),
+            "return_pct": round(net_ret * 100.0, 2),
+            "pnl": round(pnl_amt, 2),
+            "open": True,
+        })
+
+    wins = [t for t in trades_log if t["pnl"] > 0]
+    losses = [t for t in trades_log if t["pnl"] < 0]
+    gross_w = sum(t["pnl"] for t in wins)
+    gross_l = abs(sum(t["pnl"] for t in losses))
+    pf = round(gross_w / gross_l, 2) if gross_l > 0 else (99.0 if gross_w > 0 else 0.0)
+    win_rate = round((len(wins) / max(1, len(trades_log))) * 100.0, 1) if trades_log else 0.0
+    tot_ret = round(((equity - initial_capital) / initial_capital) * 100.0, 2)
+    bh_ret = round(((float(close[-1]) - bh_start_px) / bh_start_px) * 100.0, 2) if bh_start_px > 0 else 0.0
+
+    rets_arr = np.array(daily_rets, dtype=float)
+    std_r = float(np.std(rets_arr)) if len(rets_arr) > 2 else 0.0
+    sharpe = round((float(np.mean(rets_arr)) / std_r) * math.sqrt(252.0), 2) if std_r > 1e-9 else 0.0
+
+    return {
+        "strategy": strat,
+        "bars_tested": n,
+        "initial_capital": round(initial_capital, 2),
+        "final_equity": round(equity, 2),
+        "total_return_pct": tot_ret,
+        "buy_hold_return_pct": bh_ret,
+        "alpha_pct": round(tot_ret - bh_ret, 2),
+        "max_drawdown_pct": round(max_dd, 2),
+        "sharpe_ratio": sharpe,
+        "profit_factor": pf,
+        "win_rate_pct": win_rate,
+        "total_trades": len(trades_log),
+        "equity_curve": curve[-120:],
+        "trades": list(reversed(trades_log[-40:])),
+    }

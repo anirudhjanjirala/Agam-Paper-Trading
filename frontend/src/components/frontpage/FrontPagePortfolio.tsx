@@ -1,9 +1,11 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
+  Activity,
   AlertTriangle,
   ArrowDownRight,
+  ArrowLeftRight,
   ArrowUpRight,
   Briefcase,
   CheckCircle2,
@@ -17,7 +19,8 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { formatAssetPrice, formatNumber, getCurrencySymbol } from "@/lib/format";
+import { formatAssetPrice, formatNumber, formatQty, getCurrencySymbol, getPricePrecision } from "@/lib/format";
+import { authFetch } from "@/lib/api";
 import CountryFlag from "@/components/CountryFlag";
 import {
   CapitalHealthEntry,
@@ -40,10 +43,25 @@ interface FrontPagePortfolioProps {
   taxSummaryByCountry: Record<string, CountryTaxSummary>;
   analyticsByCountry: Record<string, CountryAnalytics>;
   onClosePosition: (symbol: string, quantity: number, orderType: string, productType?: string) => Promise<void>;
+  onReversePosition?: (positionId: string) => Promise<void>;
   onSquareOffAll: (country?: string) => Promise<void>;
   onUpdateRisk: (positionId: string, sl: number | null, tp: number | null, tsl: number | null) => Promise<void>;
   onOpenSymbol: (symbol: string) => void;
   onShareIdea?: (pos: Position) => void;
+}
+
+interface RiskAnalytics {
+  total_equity_usd: number;
+  margin_utilization_pct: number;
+  portfolio_heat_pct: number;
+  risk_at_sl_usd: number;
+  long_exposure_usd: number;
+  short_exposure_usd: number;
+  net_exposure_usd: number;
+  profit_factor: number;
+  expectancy_usd: number;
+  max_drawdown_pct: number;
+  win_rate_pct: number;
 }
 
 export default function FrontPagePortfolio({
@@ -57,11 +75,25 @@ export default function FrontPagePortfolio({
   taxSummaryByCountry,
   analyticsByCountry,
   onClosePosition,
+  onReversePosition,
   onSquareOffAll,
   onUpdateRisk,
   onOpenSymbol,
   onShareIdea,
 }: FrontPagePortfolioProps) {
+  const [riskStats, setRiskStats] = useState<RiskAnalytics | null>(null);
+  useEffect(() => {
+    let active = true;
+    authFetch("/api/portfolio/risk-analytics")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: RiskAnalytics | null) => {
+        if (active && d) setRiskStats(d);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [positions.length, closedTrades.length]);
   const [countryFilter, setCountryFilter] = useState<string>(selectedCountry === "ALL" ? "IND" : selectedCountry);
   const [subTab, setSubTab] = useState<"open" | "holdings" | "intraday" | "closed">("open");
   const [editingPos, setEditingPos] = useState<Position | null>(null);
@@ -136,7 +168,7 @@ export default function FrontPagePortfolio({
       {/* Country Jurisdiction Bar */}
       <div className="bg-[#FFFFFF] border border-[#E0E3EB] rounded-2xl p-3 flex flex-wrap items-center justify-between gap-3 shadow-sm">
         <div className="flex flex-wrap items-center gap-1.5">
-          {(["IND", "USA", "CANADA", "CHINA", "EU"] as const).map((code) => {
+          {(["IND", "USA", "CANADA", "CHINA", "EU", "CRYPTO", "FOREX"] as const).map((code) => {
             const m = COUNTRY_META[code];
             const cnt = positions.filter((p) => (p.country || "USA") === code).length;
             const active = countryFilter === code;
@@ -240,6 +272,49 @@ export default function FrontPagePortfolio({
       )}
 
       {/* FrontPage Portfolio Hero Summary Card */}
+      {riskStats && (
+        <div className="bg-[#FFFFFF] border border-[#E0E3EB] rounded-2xl p-4 shadow-sm space-y-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-black text-[#131722] flex items-center gap-1.5">
+              <Activity className="w-4 h-4 text-[#2962FF]" /> Institutional Cross-Market Risk &amp; Exposure Desk (USD Normalized)
+            </span>
+            <span className="text-[10px] font-mono text-[#787B86]">
+              Long ${formatNumber(riskStats.long_exposure_usd, 0)} · Short ${formatNumber(riskStats.short_exposure_usd, 0)}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 text-xs">
+            <div className="bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl p-2.5">
+              <span className="text-[10px] font-mono text-[#787B86] uppercase block">Total Global Equity</span>
+              <strong className="font-mono text-sm text-[#2962FF]">${formatNumber(riskStats.total_equity_usd, 2)}</strong>
+            </div>
+            <div className="bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl p-2.5">
+              <span className="text-[10px] font-mono text-[#787B86] uppercase block">Margin Util %</span>
+              <strong className="font-mono text-sm text-[#131722]">{riskStats.margin_utilization_pct.toFixed(2)}%</strong>
+            </div>
+            <div className="bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl p-2.5">
+              <span className="text-[10px] font-mono text-[#787B86] uppercase block">Portfolio Heat (SL)</span>
+              <strong className={`font-mono text-sm ${riskStats.portfolio_heat_pct > 5 ? "text-[#F23645]" : "text-[#089981]"}`}>
+                {riskStats.portfolio_heat_pct.toFixed(2)}% (${formatNumber(riskStats.risk_at_sl_usd, 0)})
+              </strong>
+            </div>
+            <div className="bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl p-2.5">
+              <span className="text-[10px] font-mono text-[#787B86] uppercase block">Profit Factor</span>
+              <strong className="font-mono text-sm text-[#089981]">{riskStats.profit_factor.toFixed(2)}</strong>
+            </div>
+            <div className="bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl p-2.5">
+              <span className="text-[10px] font-mono text-[#787B86] uppercase block">Expectancy / Trade</span>
+              <strong className={`font-mono text-sm ${riskStats.expectancy_usd >= 0 ? "text-[#089981]" : "text-[#F23645]"}`}>
+                {riskStats.expectancy_usd >= 0 ? "+" : "-"}${formatNumber(Math.abs(riskStats.expectancy_usd), 2)}
+              </strong>
+            </div>
+            <div className="bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl p-2.5">
+              <span className="text-[10px] font-mono text-[#787B86] uppercase block">Max Drawdown</span>
+              <strong className="font-mono text-sm text-[#F23645]">-{riskStats.max_drawdown_pct.toFixed(2)}%</strong>
+            </div>
+          </div>
+        </div>
+      )}
+
       {!isAll ? (
         <div className="bg-[#FFFFFF] border border-[#E0E3EB] rounded-2xl p-5 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3 pb-4 mb-4 border-b border-[#E0E3EB]">
@@ -345,8 +420,8 @@ export default function FrontPagePortfolio({
           )}
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-          {(["IND", "USA", "CANADA", "CHINA", "EU"] as const).map((code) => {
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-3">
+          {(["IND", "USA", "CANADA", "CHINA", "EU", "CRYPTO", "FOREX"] as const).map((code) => {
             const m = COUNTRY_META[code];
             const sym = getCurrencySymbol(m.currency);
             const bal = wallets[m.currency] ?? 0;
@@ -487,15 +562,15 @@ export default function FrontPagePortfolio({
                     <div className="grid grid-cols-4 gap-2 text-[11px] bg-[#FFFFFF] border border-[#E0E3EB] rounded-lg p-2.5 font-mono">
                       <div>
                         <span className="text-[#787B86] block text-[10px]">Qty</span>
-                        <strong className="text-[#131722]">{pos.quantity}</strong>
+                        <strong className="text-[#131722]">{formatQty(pos.quantity)}</strong>
                       </div>
                       <div>
                         <span className="text-[#787B86] block text-[10px]">Avg Price</span>
-                        <strong className="text-[#131722]">{formatAssetPrice(pos.avg_price, pos.currency)}</strong>
+                        <strong className="text-[#131722]">{formatAssetPrice(pos.avg_price, pos.currency, pos.symbol)}</strong>
                       </div>
                       <div>
                         <span className="text-[#787B86] block text-[10px]">Live LTP</span>
-                        <strong className="text-[#131722]">{formatAssetPrice(pos.current_price, pos.currency)}</strong>
+                        <strong className="text-[#131722]">{formatAssetPrice(pos.current_price, pos.currency, pos.symbol)}</strong>
                       </div>
                       <div>
                         <span className="text-[#787B86] block text-[10px]">Est. Total Fees</span>
@@ -508,19 +583,19 @@ export default function FrontPagePortfolio({
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                       <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono">
                         <span className="px-2 py-0.5 rounded bg-[#FFFFFF] border border-[#E0E3EB] text-[#787B86]">
-                          SL: <strong className="text-[#F23645]">{pos.stop_loss ? formatAssetPrice(pos.stop_loss, pos.currency) : "None"}</strong>
+                          SL: <strong className="text-[#F23645]">{pos.stop_loss ? formatAssetPrice(pos.stop_loss, pos.currency, pos.symbol) : "None"}</strong>
                         </span>
                         <span className="px-2 py-0.5 rounded bg-[#FFFFFF] border border-[#E0E3EB] text-[#787B86]">
-                          Target: <strong className="text-[#089981]">{pos.take_profit ? formatAssetPrice(pos.take_profit, pos.currency) : "None"}</strong>
+                          Target: <strong className="text-[#089981]">{pos.take_profit ? formatAssetPrice(pos.take_profit, pos.currency, pos.symbol) : "None"}</strong>
                         </span>
                         {pos.trailing_sl && (
                           <span className="px-2 py-0.5 rounded bg-[#2962FF]/10 text-[#2962FF] font-bold flex items-center gap-1">
-                            <TrendingUp className="w-3 h-3" /> TSL: {formatNumber(pos.trailing_sl, 2)}
+                            <TrendingUp className="w-3 h-3" /> TSL: {formatNumber(pos.trailing_sl, getPricePrecision(pos.trailing_sl, pos.symbol))}
                           </span>
                         )}
                       </div>
 
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         <button
                           type="button"
                           onClick={() => openRiskEditor(pos)}
@@ -536,6 +611,31 @@ export default function FrontPagePortfolio({
                             title="Post trade idea to FrontPage Feed"
                           >
                             <Share2 className="w-3 h-3" /> Post
+                          </button>
+                        )}
+                        {(((pos.country === "CRYPTO" || pos.country === "FOREX") && pos.quantity >= 0.00002) ||
+                          (pos.country !== "CRYPTO" && pos.country !== "FOREX" && pos.quantity > 1)) && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const isFrac = pos.country === "CRYPTO" || pos.country === "FOREX";
+                              const half = isFrac ? Number((pos.quantity / 2).toFixed(6)) : Math.max(1, Math.floor(pos.quantity / 2));
+                              onClosePosition(pos.symbol, half, pos.order_type, pos.product_type);
+                            }}
+                            className="px-2 py-1 rounded-lg bg-[#F0F3FA] hover:bg-[#2962FF] text-[#2962FF] hover:text-white text-[11px] font-bold transition"
+                            title="Close 50% of this position"
+                          >
+                            50% Trim
+                          </button>
+                        )}
+                        {onReversePosition && (
+                          <button
+                            type="button"
+                            onClick={() => onReversePosition(pos.id)}
+                            className="px-2.5 py-1 rounded-lg bg-[#F0F3FA] hover:bg-[#131722] text-[#131722] hover:text-white text-[11px] font-bold flex items-center gap-1 transition"
+                            title="Flip Long <-> Short at market"
+                          >
+                            <ArrowLeftRight className="w-3 h-3" /> Flip
                           </button>
                         )}
                         <button
@@ -586,9 +686,9 @@ export default function FrontPagePortfolio({
                         {ct.journal_note && <span className="block text-[10px] text-[#787B86]">{ct.journal_note}</span>}
                       </td>
                       <td className="py-2.5 px-3 font-mono font-bold text-[#2962FF]">{ct.side} · {ct.product_type}</td>
-                      <td className="py-2.5 px-3 text-right font-mono">{ct.quantity}</td>
+                      <td className="py-2.5 px-3 text-right font-mono">{formatQty(ct.quantity)}</td>
                       <td className="py-2.5 px-3 text-right font-mono">
-                        {formatAssetPrice(ct.entry_price, ct.currency)} → {formatAssetPrice(ct.exit_price, ct.currency)}
+                        {formatAssetPrice(ct.entry_price, ct.currency, ct.symbol)} → {formatAssetPrice(ct.exit_price, ct.currency, ct.symbol)}
                       </td>
                       <td className={`py-2.5 px-3 text-right font-mono font-bold ${ct.gross_pnl >= 0 ? "text-[#089981]" : "text-[#F23645]"}`}>
                         {ct.gross_pnl >= 0 ? "+" : ""}{sym}{formatNumber(ct.gross_pnl, 2)}
@@ -625,7 +725,7 @@ export default function FrontPagePortfolio({
                 <div>
                   <h3 className="text-sm font-black text-[#131722]">Modify Risk — {editingPos.symbol}</h3>
                   <p className="text-[11px] text-[#787B86]">
-                    LTP: {formatAssetPrice(editingPos.current_price, editingPos.currency)} · Entry: {formatAssetPrice(editingPos.avg_price, editingPos.currency)}
+                    LTP: {formatAssetPrice(editingPos.current_price, editingPos.currency, editingPos.symbol)} · Entry: {formatAssetPrice(editingPos.avg_price, editingPos.currency, editingPos.symbol)}
                   </p>
                 </div>
               </div>

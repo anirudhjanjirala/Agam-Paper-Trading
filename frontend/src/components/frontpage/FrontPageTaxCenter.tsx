@@ -21,6 +21,8 @@ const CALC_DEFAULTS: Record<string, { symbol: string; buyPx: string; sellPx: str
   EU_UK: { symbol: "SHEL.L", buyPx: "2600", sellPx: "2700", qty: "100" },
   EU_FR: { symbol: "MC.PA", buyPx: "620", sellPx: "645", qty: "10" },
   EU_DE: { symbol: "SAP.DE", buyPx: "220", sellPx: "232", qty: "20" },
+  CRYPTO: { symbol: "BTC-USD", buyPx: "85000", sellPx: "90000", qty: "0.25" },
+  FOREX: { symbol: "EURUSD=X", buyPx: "1.0800", sellPx: "1.0950", qty: "10000" },
 };
 
 export default function FrontPageTaxCenter({
@@ -30,7 +32,7 @@ export default function FrontPageTaxCenter({
 }: FrontPageTaxCenterProps) {
   const [activeCountry, setActiveCountry] = useState<string>(selectedCountry === "ALL" ? "IND" : selectedCountry);
   const [calcJurisdiction, setCalcJurisdiction] = useState<string>(selectedCountry === "EU" ? "EU_UK" : selectedCountry === "ALL" ? "IND" : selectedCountry);
-  const [calcCategory, setCalcCategory] = useState<"stocks" | "etfs" | "commodities" | "forex" | "bonds">("stocks");
+  const [calcCategory, setCalcCategory] = useState<"stocks" | "etfs" | "commodities" | "forex" | "bonds" | "crypto">("stocks");
   const [calcProduct, setCalcProduct] = useState<"DELIVERY" | "INTRADAY" | "FUTURES" | "OPTIONS">("DELIVERY");
   const [calcPlan, setCalcPlan] = useState<"DISCOUNT" | "PRO">("DISCOUNT");
   const [buyPx, setBuyPx] = useState<string>(CALC_DEFAULTS[calcJurisdiction]?.buyPx || "1400");
@@ -54,7 +56,7 @@ export default function FrontPageTaxCenter({
     const def = CALC_DEFAULTS[calcJurisdiction] || CALC_DEFAULTS.IND;
     const bPx = parseFloat(buyPx) || 0;
     const sPx = parseFloat(sellPx) || 0;
-    const q = Math.max(1, parseInt(qty, 10) || 1);
+    const q = Math.max(0.0001, parseFloat(qty) || 1);
     if (bPx <= 0 || sPx <= 0) return;
     const controller = new AbortController();
     Promise.all([
@@ -86,7 +88,7 @@ export default function FrontPageTaxCenter({
   const an = analyticsByCountry[activeCountry];
   const currSym = getCurrencySymbol(ts?.currency || cMeta.currency);
 
-  const qNum = Math.max(1, parseInt(qty, 10) || 1);
+  const qNum = Math.max(0.0001, parseFloat(qty) || 1);
   const grossProfit = ((parseFloat(sellPx) || 0) - (parseFloat(buyPx) || 0)) * qNum;
   const totalRtCharges = (buyPreview?.total_charges || 0) + (sellPreview?.total_charges || 0);
   const netProfit = grossProfit - totalRtCharges;
@@ -97,7 +99,7 @@ export default function FrontPageTaxCenter({
       {/* Separate Country Tabs */}
       <div className="bg-[#FFFFFF] border border-[#E0E3EB] rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 shadow-sm">
         <div className="flex flex-wrap items-center gap-1.5">
-          {(["IND", "USA", "CANADA", "CHINA", "EU"] as const).map((code) => {
+          {(["IND", "USA", "CANADA", "CHINA", "EU", "CRYPTO", "FOREX"] as const).map((code) => {
             const m = COUNTRY_META[code];
             const active = activeCountry === code;
             return (
@@ -264,7 +266,7 @@ export default function FrontPageTaxCenter({
             <Calculator className="w-5 h-5 text-[#2962FF]" />
             <div>
               <h3 className="text-sm font-black text-[#131722]">Live Country Brokerage &amp; Tax Simulator</h3>
-              <p className="text-[11px] text-[#787B86]">Simulate exact Buy + Sell round-trip taxes &amp; breakeven across India, USA, Canada, China &amp; Europe/UK</p>
+              <p className="text-[11px] text-[#787B86]">Simulate exact Buy + Sell round-trip taxes &amp; breakeven across India, USA, Canada, China, Europe/UK, Crypto &amp; Forex</p>
             </div>
           </div>
         </div>
@@ -293,19 +295,22 @@ export default function FrontPageTaxCenter({
               <option value="EU_UK">UK · London (LSE)</option>
               <option value="EU_FR">FRA · France (0.4% FTT)</option>
               <option value="EU_DE">DEU · Germany (XETRA)</option>
+              <option value="CRYPTO">CRYPTO · 24/7 Spot &amp; Perps</option>
+              <option value="FOREX">FOREX · ECN FX Pairs</option>
             </select>
           </div>
           <div>
             <label className="text-[10px] font-bold text-[#787B86] uppercase block mb-1">Asset Class</label>
             <select
               value={calcCategory}
-              onChange={(e) => setCalcCategory(e.target.value as "stocks" | "etfs" | "commodities" | "forex" | "bonds")}
+              onChange={(e) => setCalcCategory(e.target.value as "stocks" | "etfs" | "commodities" | "forex" | "bonds" | "crypto")}
               className="w-full bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl px-2.5 py-2 font-bold text-[#131722]"
             >
               <option value="stocks">Stocks (Equity)</option>
+              <option value="crypto">Crypto (Spot / Perp)</option>
+              <option value="forex">Forex (FX Pairs)</option>
               <option value="etfs">ETFs</option>
               <option value="commodities">Commodities (MCX/CME)</option>
-              <option value="forex">Forex (FX Pairs)</option>
               <option value="bonds">Bonds / G-Sec / Treasury</option>
             </select>
           </div>
@@ -342,8 +347,8 @@ export default function FrontPageTaxCenter({
             <input type="number" step="any" value={sellPx} onChange={(e) => setSellPx(e.target.value)} className="w-full bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl px-2.5 py-2 font-mono font-bold text-[#131722]" />
           </div>
           <div>
-            <label className="text-[10px] font-bold text-[#787B86] uppercase block mb-1">Quantity</label>
-            <input type="number" min="1" value={qty} onChange={(e) => setQty(e.target.value)} className="w-full bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl px-2.5 py-2 font-mono font-bold text-[#131722]" />
+            <label className="text-[10px] font-bold text-[#787B86] uppercase block mb-1">Quantity / Units</label>
+            <input type="number" step="any" min="0.0001" value={qty} onChange={(e) => setQty(e.target.value)} className="w-full bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl px-2.5 py-2 font-mono font-bold text-[#131722]" />
           </div>
         </div>
 
@@ -380,7 +385,7 @@ export default function FrontPageTaxCenter({
             <div className="space-y-1.5 font-mono">
               <div className="flex justify-between"><span className="text-[#787B86]">Gross P&amp;L</span><strong className={grossProfit >= 0 ? "text-[#089981]" : "text-[#F23645]"}>{formatMoney(grossProfit, calcCurr)}</strong></div>
               <div className="flex justify-between"><span className="text-[#787B86]">Total Round-Trip Taxes &amp; Brok</span><strong className="text-[#F23645]">-{formatMoney(totalRtCharges, calcCurr)}</strong></div>
-              <div className="flex justify-between"><span className="text-[#787B86]">Points to Breakeven</span><strong className="text-[#2962FF]">±{formatAssetPrice(buyPreview?.breakeven_delta ?? 0, calcCurr)}</strong></div>
+              <div className="flex justify-between"><span className="text-[#787B86]">Points to Breakeven</span><strong className="text-[#2962FF]">±{formatAssetPrice(buyPreview?.breakeven_delta ?? 0, calcCurr, CALC_DEFAULTS[calcJurisdiction]?.symbol)}</strong></div>
             </div>
             <div className="pt-2 border-t border-[#E0E3EB] flex justify-between items-center text-sm font-black">
               <span>Net P&amp;L</span>

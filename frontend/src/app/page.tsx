@@ -83,7 +83,7 @@ interface SessionInfo {
 
 type ActiveView = "chart" | "portfolio" | "orders" | "taxes" | "feed" | "overview" | "multichart" | "screener" | "replay" | "ipos" | "macro";
 
-const QUICK_TIMEFRAMES: TimeframeKey[] = ["1m", "5m", "15m", "1h", "1D", "1W", "1M"];
+const QUICK_TIMEFRAMES: TimeframeKey[] = ["1m", "5m", "15m", "1h", "4h", "1D", "1W", "1M"];
 const TICK_TIMEFRAMES: TimeframeKey[] = ["1s", "5s", "10T"];
 
 const REGION_CURRENCY_MAP: Record<string, string> = {
@@ -92,6 +92,8 @@ const REGION_CURRENCY_MAP: Record<string, string> = {
   CANADA: "CAD",
   CHINA: "CNY",
   EU: "EUR",
+  CRYPTO: "USD",
+  FOREX: "USD",
   ALL: "USD",
 };
 
@@ -130,6 +132,7 @@ export default function Home() {
   }, []);
 
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
+  const [walletMenuOpen, setWalletMenuOpen] = useState<boolean>(false);
   const [searchOpen, setSearchOpen] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [searchRegion, setSearchRegion] = useState<string>("ALL");
@@ -230,6 +233,25 @@ export default function Home() {
     pinnedSymbolRef.current = null;
     setSelectedCountry(region);
     setActiveCurrency(REGION_CURRENCY_MAP[region] || "USD");
+    if (region === "CRYPTO") {
+      setSelectedCategory("crypto");
+    } else if (region === "FOREX") {
+      setSelectedCategory("forex");
+    } else if (selectedCategory === "crypto" || selectedCategory === "forex") {
+      setSelectedCategory("stocks");
+    }
+  };
+
+  const handleSelectCategorySafe = (cat: string) => {
+    pinnedSymbolRef.current = null;
+    setSelectedCategory(cat);
+    if (cat === "crypto" && selectedCountry !== "CRYPTO" && selectedCountry !== "ALL") {
+      setSelectedCountry("CRYPTO");
+      setActiveCurrency("USD");
+    } else if (cat === "forex" && selectedCountry !== "FOREX" && selectedCountry !== "ALL") {
+      setSelectedCountry("FOREX");
+      setActiveCurrency("USD");
+    }
   };
 
   const loadAssetsForFilter = useCallback(
@@ -588,7 +610,7 @@ export default function Home() {
       setSelectedAsset(assetObj);
       syncWalletCurrencyForAsset(assetObj.currency);
       const targetRegion = overrideRegion || assetObj.region || assetObj.country;
-      if (targetRegion && ["IND", "USA", "CANADA", "CHINA", "EU"].includes(targetRegion) && targetRegion !== selectedCountryRef.current) {
+      if (targetRegion && ["IND", "USA", "CANADA", "CHINA", "EU", "CRYPTO", "FOREX"].includes(targetRegion) && targetRegion !== selectedCountryRef.current) {
         setSelectedCountry(targetRegion);
       }
     };
@@ -724,6 +746,68 @@ export default function Home() {
       showToast(false, d?.detail || "Square off failed");
     }
   };
+
+  const handleReversePosition = async (positionId: string) => {
+    const res = await authFetch(`/api/positions/${encodeURIComponent(positionId)}/reverse`, {
+      method: "POST",
+    });
+    const d = await res.json().catch(() => null);
+    if (res.ok) {
+      fetchPortfolio();
+      showToast(true, d?.message || `Position flipped to ${d?.new_side || "opposite side"}!`);
+    } else {
+      showToast(false, d?.detail || "Position reverse failed");
+    }
+  };
+
+  const handlePlaceLadder = async (ladder: {
+    symbol: string;
+    total_quantity: number;
+    order_type: "BUY" | "SELL";
+    product_type?: "DELIVERY" | "INTRADAY" | "FUTURES" | "OPTIONS";
+    broker_plan?: "DISCOUNT" | "PRO";
+    price_start: number;
+    price_end: number;
+    rungs: number;
+    stop_loss?: number;
+    take_profit?: number;
+    notes?: string;
+  }): Promise<{ success: boolean; message: string }> => {
+    const res = await authFetch("/api/orders/ladder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(ladder),
+    });
+    const d = await res.json().catch(() => null);
+    if (res.ok) {
+      fetchPortfolio();
+      const msg = d?.message || `Placed ${d?.rungs_placed || ladder.rungs} ladder rungs.`;
+      showToast(true, msg);
+      return { success: true, message: msg };
+    }
+    const errMsg = d?.detail || "Ladder order failed";
+    showToast(false, errMsg);
+    return { success: false, message: errMsg };
+  };
+
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      if (!ev.altKey) return;
+      const tag = (ev.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (ev.key.toLowerCase() === "b" && selectedAsset) {
+        ev.preventDefault();
+        setOrderPreset({ symbol: selectedAsset.symbol, side: "BUY" });
+        setRightTab("order");
+      } else if (ev.key.toLowerCase() === "s" && selectedAsset) {
+        ev.preventDefault();
+        setOrderPreset({ symbol: selectedAsset.symbol, side: "SELL" });
+        setRightTab("order");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedAsset]);
 
   const handleCopyPresetToOrder = (preset: OrderDraftPreset) => {
     setOrderPreset(preset);
@@ -895,7 +979,7 @@ export default function Home() {
                 <div className="pt-1.5 border-t border-[#F0F3FA] px-2.5 py-1 space-y-1">
                   <span className="text-[10px] font-bold text-[#787B86] uppercase block">Live Sessions</span>
                   <div className="grid grid-cols-2 gap-1 text-[10px] font-mono">
-                    {(["IND", "USA", "CANADA", "CHINA", "EU"] as const).map((code) => {
+                    {(["IND", "USA", "CANADA", "CHINA", "EU", "CRYPTO", "FOREX"] as const).map((code) => {
                       const inf = sessions[code];
                       return (
                         <div key={code} className="flex items-center gap-1">
@@ -1022,7 +1106,7 @@ export default function Home() {
             }}
             title="Price & RSI Alerts"
             aria-label="Price & RSI Alerts"
-            className="h-[28px] px-1.5 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold hidden lg:flex items-center gap-1 shrink-0 transition"
+            className="h-[28px] px-1.5 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold hidden 2xl:flex items-center gap-1 shrink-0 transition"
           >
             <Bell className="w-3.5 h-3.5 text-[#6A6D78]" />
             <span className="hidden 2xl:inline">Alert</span>
@@ -1038,7 +1122,7 @@ export default function Home() {
             }}
             title="Bar Replay Studio"
             aria-label="Bar Replay Studio"
-            className="h-[28px] px-1.5 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold hidden lg:flex items-center gap-1 shrink-0 transition"
+            className="h-[28px] px-1.5 rounded-lg hover:bg-[#F0F3FA] text-[#131722] text-xs font-semibold hidden 2xl:flex items-center gap-1 shrink-0 transition"
           >
             <PlayCircle className="w-3.5 h-3.5 text-[#6A6D78]" />
             <span className="hidden 2xl:inline">Replay</span>
@@ -1050,7 +1134,7 @@ export default function Home() {
             onClick={() => setActiveView(activeView === "multichart" ? "chart" : "multichart")}
             aria-label="16-Chart Split Layout"
             title="16-Chart Split Workspace"
-            className={`h-[28px] px-1.5 rounded-lg text-xs font-semibold hidden xl:flex items-center gap-1 shrink-0 transition ${
+            className={`h-[28px] px-1.5 rounded-lg text-xs font-semibold hidden 2xl:flex items-center gap-1 shrink-0 transition ${
               activeView === "multichart" ? "bg-[#F0F3FA] text-[#2962FF]" : "text-[#131722] hover:bg-[#F0F3FA]"
             }`}
           >
@@ -1060,64 +1144,140 @@ export default function Home() {
         </div>
 
         {/* Right Utility & Paper Wallet Cluster */}
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1 shrink-0">
           {/* Live WS Status */}
           <span
             title={isWsConnected ? "WebSocket Live Feed Connected" : "Reconnecting WebSocket"}
-            className={`hidden xl:inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+            className={`hidden xl:inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
               isWsConnected ? "text-[#089981] bg-[#E8F5E9]" : "text-[#787B86] bg-[#F0F3FA]"
             }`}
           >
             <span className={`w-1.5 h-1.5 rounded-full ${isWsConnected ? "bg-[#089981] live-pulse" : "bg-[#9598A1]"}`} />
-            {isWsConnected ? "LIVE" : "SYNC"}
+            <span className="hidden 2xl:inline">{isWsConnected ? "LIVE" : "SYNC"}</span>
           </span>
 
-          {/* Region Selector */}
-          <div className="relative hidden sm:inline-flex items-center shrink-0">
+          {/* Market Hub Quick Selector (IND, USA, EU, CAN, CHN, CRYPTO, FOREX, ALL) */}
+          <div className="relative inline-flex items-center shrink-0">
+            <span className="pointer-events-none absolute left-2 flex items-center">
+              <CountryFlag code={selectedCountry} className="w-3.5 h-2.5" />
+            </span>
             <select
               aria-label="Select Market Region"
               value={selectedCountry}
               onChange={(e) => handleSelectCountry(e.target.value)}
-              className="h-[28px] appearance-none bg-[#F8F9FD] hover:bg-[#F0F3FA] border border-[#E0E3EB] rounded-lg pl-2 pr-5 text-[11px] font-bold text-[#131722] outline-none cursor-pointer whitespace-nowrap"
+              className="h-[28px] appearance-none bg-[#F8F9FD] hover:bg-[#F0F3FA] border border-[#E0E3EB] rounded-lg pl-7 pr-5 text-[11px] font-bold text-[#131722] outline-none cursor-pointer whitespace-nowrap"
             >
               <option value="IND">IND</option>
               <option value="USA">USA</option>
+              <option value="EU">EU</option>
               <option value="CANADA">CAN</option>
               <option value="CHINA">CHN</option>
-              <option value="EU">EU</option>
+              <option value="CRYPTO">CRYPTO</option>
+              <option value="FOREX">FOREX</option>
               <option value="ALL">ALL</option>
             </select>
             <ChevronDown className="w-3 h-3 text-[#787B86] pointer-events-none absolute right-1.5" />
           </div>
 
-          {/* Compact Paper Wallet + Currency + Reset */}
-          <div className="h-[28px] bg-[#F0F3FA] rounded-lg px-2 flex items-center gap-1.5 text-xs shrink-0">
-            <Wallet className="w-3.5 h-3.5 text-[#2962FF] shrink-0" />
-            <span suppressHydrationWarning className="hidden sm:inline font-mono font-bold text-[#131722] tabular-nums whitespace-nowrap">
-              {currSymbol}{formatNumber(currentBalance, 2)}
-            </span>
-            <span className="hidden sm:inline h-3.5 w-[1px] bg-[#D1D4DC]" />
-            <div className="relative inline-flex items-center shrink-0">
-              <select
-                aria-label="Wallet Currency"
-                value={activeCurrency}
-                onChange={(e) => setActiveCurrency(e.target.value)}
-                className="appearance-none bg-transparent pr-3.5 pl-0.5 text-[11px] font-bold text-[#2962FF] outline-none cursor-pointer whitespace-nowrap"
+          {/* All-Wallets Quick Dropdown Pill */}
+          <div className="relative shrink-0">
+            <div className="h-[28px] bg-[#F0F3FA] rounded-lg px-2 flex items-center gap-1.5 text-xs">
+              <button
+                type="button"
+                onClick={() => setWalletMenuOpen((v) => !v)}
+                className="flex items-center gap-1.5 hover:text-[#2962FF] transition"
+                title="View all multi-currency wallets & capital health"
               >
-                <option value="INR">INR</option>
-                <option value="USD">USD</option>
-                <option value="CAD">CAD</option>
-                <option value="CNY">CNY</option>
-                <option value="EUR">EUR</option>
-                <option value="GBP">GBP</option>
-              </select>
-              <ChevronDown className="w-3 h-3 text-[#2962FF] pointer-events-none absolute right-0" />
+                <Wallet className="w-3.5 h-3.5 text-[#2962FF] shrink-0" />
+                <span suppressHydrationWarning className="hidden sm:inline font-mono font-bold text-[#131722] tabular-nums whitespace-nowrap">
+                  {currSymbol}{formatNumber(currentBalance, 2)}
+                </span>
+              </button>
+              <span className="hidden sm:inline h-3.5 w-[1px] bg-[#D1D4DC]" />
+              <div className="relative inline-flex items-center shrink-0">
+                <select
+                  aria-label="Wallet Currency"
+                  value={activeCurrency}
+                  onChange={(e) => setActiveCurrency(e.target.value)}
+                  className="appearance-none bg-transparent pr-3.5 pl-0.5 text-[11px] font-bold text-[#2962FF] outline-none cursor-pointer whitespace-nowrap"
+                >
+                  <option value="INR">INR</option>
+                  <option value="USD">USD</option>
+                  <option value="CAD">CAD</option>
+                  <option value="CNY">CNY</option>
+                  <option value="EUR">EUR</option>
+                  <option value="GBP">GBP</option>
+                </select>
+                <ChevronDown className="w-3 h-3 text-[#2962FF] pointer-events-none absolute right-0" />
+              </div>
             </div>
+
+            {walletMenuOpen && (
+              <div className="absolute right-0 top-full mt-1.5 w-72 bg-[#FFFFFF] border border-[#E0E3EB] rounded-2xl shadow-2xl p-3 z-[85] space-y-2 text-xs">
+                <div className="flex items-center justify-between border-b border-[#F0F3FA] pb-2">
+                  <span className="font-black text-[#131722]">Multi-Currency Vaults</span>
+                  <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-[#E8F5E9] text-[#089981]">
+                    Fixed Capital
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {(["INR", "USD", "EUR", "GBP", "CAD", "CNY"] as const).map((curr) => {
+                    const detail = walletDetails[curr];
+                    const h = capitalHealth[curr];
+                    const bal = wallets[curr] ?? 0;
+                    const sym = getCurrencySymbol(curr);
+                    return (
+                      <button
+                        key={curr}
+                        type="button"
+                        onClick={() => {
+                          setActiveCurrency(curr);
+                          setWalletMenuOpen(false);
+                        }}
+                        className={`w-full px-2.5 py-1.5 rounded-xl border text-left flex items-center justify-between transition ${
+                          activeCurrency === curr
+                            ? "border-[#2962FF] bg-[#2962FF]/5"
+                            : "border-[#E0E3EB] hover:bg-[#F8F9FD]"
+                        }`}
+                      >
+                        <div>
+                          <div className="font-bold text-[#131722] flex items-center gap-1.5">
+                            <span>{curr}</span>
+                            {h && h.status !== "HEALTHY" && (
+                              <span className="text-[9px] px-1 rounded bg-[#FFEBEE] text-[#F23645]">{h.status}</span>
+                            )}
+                          </div>
+                          <span className="text-[10px] font-mono text-[#787B86]">
+                            Margin: {sym}{formatNumber(detail?.margin_used ?? 0, 0, 0)}
+                          </span>
+                        </div>
+                        <div className="text-right font-mono">
+                          <span className="font-bold text-[#131722] block">{sym}{formatNumber(bal, 2)}</span>
+                          <span className="text-[10px] text-[#787B86]">
+                            Eq: {sym}{formatNumber(detail?.equity ?? bal, 0, 0)}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setWalletMenuOpen(false);
+                    setActiveView("portfolio");
+                  }}
+                  className="w-full py-1.5 rounded-xl bg-[#131722] hover:bg-[#2962FF] text-white font-bold text-[11px] transition"
+                >
+                  Open Full Portfolio Overview →
+                </button>
+              </div>
+            )}
           </div>
 
           <span
             title="Fixed starting capital — wallet resets permanently disabled"
-            className="h-[28px] px-2 rounded-lg bg-[#E8F5E9] text-[#089981] text-[10px] font-bold hidden md:inline-flex items-center gap-1 shrink-0"
+            className="h-[28px] px-2 rounded-lg bg-[#E8F5E9] text-[#089981] text-[10px] font-bold hidden 2xl:inline-flex items-center gap-1 shrink-0"
           >
             <Lock className="w-3 h-3" /> Fixed
           </span>
@@ -1127,7 +1287,7 @@ export default function Home() {
             onClick={() => setActivityOpen(true)}
             aria-label="Persistent Activity Audit Log"
             title="Local PC Persistent Audit Trail"
-            className="h-[28px] px-2 rounded-lg bg-[#F8F9FD] hover:bg-[#F0F3FA] border border-[#E0E3EB] text-[#131722] text-[11px] font-bold hidden sm:inline-flex items-center gap-1 shrink-0 transition"
+            className="h-[28px] px-1.5 rounded-lg bg-[#F8F9FD] hover:bg-[#F0F3FA] border border-[#E0E3EB] text-[#131722] text-[11px] font-bold hidden sm:inline-flex items-center gap-1 shrink-0 transition"
           >
             <ClipboardList className="w-3.5 h-3.5 text-[#2962FF]" />
             <span className="hidden 2xl:inline">Audit Log</span>
@@ -1138,17 +1298,17 @@ export default function Home() {
             onClick={() => setDisclaimerOpen(true)}
             aria-label="Risk and Regulatory Disclaimers"
             title="View Risk, Leverage & Regulatory Disclaimers"
-            className="h-[28px] px-2 rounded-lg bg-[#FFEBEE] hover:bg-[#F23645] text-[#F23645] hover:text-white text-[11px] font-bold inline-flex items-center gap-1 shrink-0 transition"
+            className="h-[28px] px-1.5 rounded-lg bg-[#FFEBEE] hover:bg-[#F23645] text-[#F23645] hover:text-white text-[11px] font-bold inline-flex items-center gap-1 shrink-0 transition"
           >
             <ShieldAlert className="w-3.5 h-3.5" />
-            <span className="hidden xl:inline">Risks</span>
+            <span className="hidden 2xl:inline">Risks</span>
           </button>
 
           {/* Overview / Superchart Primary Action Pill */}
           <button
             type="button"
             onClick={() => setActiveView(activeView === "overview" ? "chart" : "overview")}
-            className="h-[28px] px-2.5 rounded-lg bg-[#131722] hover:bg-[#2962FF] text-white text-xs font-bold transition shrink-0"
+            className="h-[28px] px-2 rounded-lg bg-[#131722] hover:bg-[#2962FF] text-white text-xs font-bold transition shrink-0"
           >
             {activeView === "overview" ? "Superchart" : "Overview"}
           </button>
@@ -1170,10 +1330,10 @@ export default function Home() {
             onClick={() => setAuthOpen(true)}
             aria-label="Owner Vault Profile"
             title={`Signed in: ${user.email}`}
-            className="h-[28px] px-2 rounded-lg text-[11px] font-bold flex items-center gap-1 transition shrink-0 bg-[#E8F5E9] text-[#089981]"
+            className="h-[28px] px-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 transition shrink-0 bg-[#E8F5E9] text-[#089981]"
           >
             <User className="w-3.5 h-3.5" />
-            <span className="hidden xl:inline max-w-[76px] truncate">
+            <span className="hidden 2xl:inline max-w-[76px] truncate">
               {user.display_name || user.email.split("@")[0]}
             </span>
           </button>
@@ -1235,24 +1395,46 @@ export default function Home() {
           })}
         </nav>
 
-        {/* Live Active Country Indices Ticker */}
+        {/* Live Active Market Tape & Session Strip */}
         <div className="hidden lg:flex items-center gap-2 text-[11px] font-mono min-w-0 overflow-x-auto scrollbar-none">
-          <span className="text-[10px] font-sans font-bold text-[#787B86] uppercase inline-flex items-center gap-1.5">
-            <CountryFlag code={selectedCountry === "ALL" ? "IND" : selectedCountry} /> Indices:
+          <span className="text-[10px] font-sans font-bold text-[#787B86] uppercase inline-flex items-center gap-1.5 shrink-0">
+            <CountryFlag code={selectedCountry === "ALL" ? "IND" : selectedCountry} />
+            {selectedCountry === "CRYPTO" ? "Crypto 24/7:" : selectedCountry === "FOREX" ? "FX Pairs:" : "Indices:"}
           </span>
           {(COUNTRY_META[selectedCountry === "ALL" ? "IND" : selectedCountry] || COUNTRY_META.IND).indices.map((idxSym) => {
             const q = indexQuotes[idxSym];
             const bull = (q?.change_percent ?? 0) >= 0;
-            const cleanLbl = idxSym.replace("^NSEI", "NIFTY 50").replace("^BSESN", "SENSEX").replace("^NSEBANK", "BANKNIFTY").replace("^GSPC", "S&P 500").replace("^IXIC", "NASDAQ").replace("^DJI", "DOW").replace("^GSPTSE", "TSX").replace("000001.SS", "SSE").replace("399001.SZ", "SZSE").replace("^GDAXI", "DAX").replace("^FTSE", "FTSE").replace("^FCHI", "CAC40");
+            const cleanLbl = idxSym
+              .replace("^NSEI", "NIFTY 50")
+              .replace("^BSESN", "SENSEX")
+              .replace("^NSEBANK", "BANKNIFTY")
+              .replace("^GSPC", "S&P 500")
+              .replace("^IXIC", "NASDAQ")
+              .replace("^DJI", "DOW")
+              .replace("^GSPTSE", "TSX")
+              .replace("000001.SS", "SSE")
+              .replace("399001.SZ", "SZSE")
+              .replace("^GDAXI", "DAX")
+              .replace("^FTSE", "FTSE")
+              .replace("^FCHI", "CAC40")
+              .replace("BTC-USD", "BTC")
+              .replace("ETH-USD", "ETH")
+              .replace("SOL-USD", "SOL")
+              .replace("BNB-USD", "BNB")
+              .replace("EURUSD=X", "EUR/USD")
+              .replace("GBPUSD=X", "GBP/USD")
+              .replace("USDJPY=X", "USD/JPY")
+              .replace("DX-Y.NYB", "DXY");
+            const dec = idxSym.endsWith("=X") ? (idxSym.includes("JPY") ? 3 : 4) : 2;
             return (
               <button
                 key={idxSym}
                 type="button"
                 onClick={() => openSymbolEverywhere(idxSym)}
-                className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#FFFFFF] border border-[#E0E3EB] hover:border-[#2962FF] transition tabular-nums"
+                className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#FFFFFF] border border-[#E0E3EB] hover:border-[#2962FF] transition tabular-nums shrink-0"
               >
                 <span className="font-bold text-[#131722]">{cleanLbl}</span>
-                <span className="text-[#131722]">{q?.price ? formatNumber(q.price, 2) : "--"}</span>
+                <span className="text-[#131722]">{q?.price ? formatNumber(q.price, dec, dec) : "--"}</span>
                 {q?.price ? (
                   <span className={bull ? "text-[#089981] font-bold" : "text-[#F23645] font-bold"}>
                     {bull ? "+" : ""}{q.change_percent.toFixed(2)}%
@@ -1261,6 +1443,23 @@ export default function Home() {
               </button>
             );
           })}
+          {sessions[selectedCountry === "ALL" ? "IND" : selectedCountry] && (
+            <span
+              className={`px-2 py-0.5 rounded text-[10px] font-bold shrink-0 inline-flex items-center gap-1 ${
+                sessions[selectedCountry === "ALL" ? "IND" : selectedCountry].open
+                  ? "bg-[#E8F5E9] text-[#089981]"
+                  : "bg-[#FFFFFF] border border-[#E0E3EB] text-[#787B86]"
+              }`}
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  sessions[selectedCountry === "ALL" ? "IND" : selectedCountry].open ? "bg-[#089981] live-pulse" : "bg-[#9598A1]"
+                }`}
+              />
+              {sessions[selectedCountry === "ALL" ? "IND" : selectedCountry].status} ·{" "}
+              {sessions[selectedCountry === "ALL" ? "IND" : selectedCountry].local_time}
+            </span>
+          )}
         </div>
       </div>
 
@@ -1327,37 +1526,39 @@ export default function Home() {
         <div className="flex-1 min-h-0 flex gap-[4px] bg-[#EBECEF]">
           {/* Center Column: Full-Height Superchart + Collapsible Bottom Drawer */}
           <div className="flex-1 min-w-0 min-h-0 flex flex-col gap-[4px]">
-            <TradingViewChart
-              symbol={selectedAsset?.symbol || "RELIANCE.NS"}
-              name={selectedAsset?.name || "Loading..."}
-              currentPrice={selectedAsset?.price || 0}
-              priceChange={selectedAsset?.change || 0}
-              priceChangePercent={selectedAsset?.change_percent || 0}
-              currency={selectedAsset?.currency || activeCurrency}
-              asOf={selectedAsset?.as_of}
-              exchange={selectedAsset?.exchange}
-              isMarketOpen={activeSession?.open}
-              bid={selectedAsset?.bid}
-              ask={selectedAsset?.ask}
-              timeframe={timeframe}
-              onChangeTimeframe={setTimeframe}
-              chartStyle={chartStyle}
-              indicatorsOpen={indicatorsOpen}
-              onCloseIndicators={() => setIndicatorsOpen(false)}
-              onCatalogLoaded={setCatalogCount}
-              refreshNonce={refreshNonce}
-              openPositions={positions}
-              onQuickOrder={(side) =>
-                selectedAsset &&
-                handleExecuteOrder({
-                  symbol: selectedAsset.symbol,
-                  quantity: 1,
-                  order_type: side,
-                  order_mode: "MARKET",
-                })
-              }
-              onOpenOverview={() => setActiveView("overview")}
-            />
+            <div className="flex-1 min-w-0 min-h-0 overflow-hidden relative z-10 flex flex-col">
+              <TradingViewChart
+                symbol={selectedAsset?.symbol || "RELIANCE.NS"}
+                name={selectedAsset?.name || "Loading..."}
+                currentPrice={selectedAsset?.price || 0}
+                priceChange={selectedAsset?.change || 0}
+                priceChangePercent={selectedAsset?.change_percent || 0}
+                currency={selectedAsset?.currency || activeCurrency}
+                asOf={selectedAsset?.as_of}
+                exchange={selectedAsset?.exchange}
+                isMarketOpen={activeSession?.open}
+                bid={selectedAsset?.bid}
+                ask={selectedAsset?.ask}
+                timeframe={timeframe}
+                onChangeTimeframe={setTimeframe}
+                chartStyle={chartStyle}
+                indicatorsOpen={indicatorsOpen}
+                onCloseIndicators={() => setIndicatorsOpen(false)}
+                onCatalogLoaded={setCatalogCount}
+                refreshNonce={refreshNonce}
+                openPositions={positions}
+                onQuickOrder={(side) =>
+                  selectedAsset &&
+                  handleExecuteOrder({
+                    symbol: selectedAsset.symbol,
+                    quantity: 1,
+                    order_type: side,
+                    order_mode: "MARKET",
+                  })
+                }
+                onOpenOverview={() => setActiveView("overview")}
+              />
+            </div>
 
             <BottomTerminalDrawer
               isOpen={bottomOpen}
@@ -1374,8 +1575,9 @@ export default function Home() {
               ordersHistory={ordersHistory}
               rejectedOrders={rejectedOrders}
               onClosePosition={handleClosePosition}
+              onReversePosition={handleReversePosition}
               onCancelPending={handleCancelPending}
-              onSquareOffAll={() => handleSquareOffAll(selectedCountry === "ALL" ? undefined : selectedCountry)}
+              onSquareOffAll={() => handleSquareOffAll(undefined)}
               onSelectSymbolFromScreener={(sym) => openSymbolEverywhere(sym)}
             />
           </div>
@@ -1387,7 +1589,7 @@ export default function Home() {
             selectedCountry={selectedCountry}
             onSelectCountry={handleSelectCountry}
             selectedCategory={selectedCategory}
-            onSelectCategory={setSelectedCategory}
+            onSelectCategory={handleSelectCategorySafe}
             assets={assets}
             selectedAsset={selectedAsset}
             onSelectSymbol={(sym, nm) => {
@@ -1404,6 +1606,7 @@ export default function Home() {
             capitalHealth={capitalHealth}
             orderPreset={orderPreset}
             onExecuteOrder={handleExecuteOrder}
+            onPlaceLadder={handlePlaceLadder}
             latestNewsAlert={latestNewsAlert}
             isMarketOpen={activeSession?.open}
             onOpenOverview={() => setActiveView("overview")}
@@ -1427,6 +1630,7 @@ export default function Home() {
               taxSummaryByCountry={taxSummaryByCountry}
               analyticsByCountry={analyticsByCountry}
               onClosePosition={handleClosePosition}
+              onReversePosition={handleReversePosition}
               onSquareOffAll={handleSquareOffAll}
               onUpdateRisk={handleUpdateRisk}
               onOpenSymbol={(sym) => openSymbolEverywhere(sym)}
@@ -1575,26 +1779,27 @@ export default function Home() {
                   setSearchQuery(v);
                   if (v.trim().length < 1) setSearchResults([]);
                 }}
-                placeholder="Type ticker, company name, or ISIN (e.g. AAPL, RELIANCE, SHOP.TO, 600519, SAP)..."
+                placeholder="Type ticker, coin, FX pair, company, or ISIN (e.g. BTC-USD, EURUSD, AAPL, RELIANCE)..."
                 className="flex-1 bg-transparent text-sm text-[#131722] placeholder-[#787B86] outline-none"
               />
             </div>
 
             <div className="px-4 py-2 border-b border-[#E0E3EB] flex flex-wrap items-center gap-1.5 text-xs">
-              {(["ALL", "IND", "USA", "CANADA", "CHINA", "EU"] as const).map((r) => (
+              {(["ALL", "IND", "USA", "EU", "CANADA", "CHINA", "CRYPTO", "FOREX"] as const).map((r) => (
                 <button
                   key={r}
                   type="button"
                   onClick={() => setSearchRegion(r)}
-                  className={`px-2.5 py-1 rounded-full font-semibold transition ${
+                  className={`px-2.5 py-1 rounded-full font-semibold inline-flex items-center gap-1 transition ${
                     searchRegion === r ? "bg-[#131722] text-white" : "bg-[#F0F3FA] text-[#787B86] hover:text-[#131722]"
                   }`}
                 >
-                  {r}
+                  {r !== "ALL" && <CountryFlag code={r} className="w-3 h-2" />}
+                  <span>{r}</span>
                 </button>
               ))}
               <span className="text-[#E0E3EB] mx-1">|</span>
-              {(["all", "stocks", "etfs", "indices", "commodities", "forex", "bonds"] as const).map((c) => (
+              {(["all", "stocks", "etfs", "indices", "commodities", "crypto", "forex", "bonds"] as const).map((c) => (
                 <button
                   key={c}
                   type="button"

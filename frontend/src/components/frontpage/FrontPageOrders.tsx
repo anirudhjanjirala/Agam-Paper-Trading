@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock, Edit3, Receipt, X } from "lucide-react";
-import { formatAssetPrice, formatMoney, formatNumber } from "@/lib/format";
+import { formatAssetPrice, formatMoney, formatNumber, formatQty, getPricePrecision } from "@/lib/format";
 import { COUNTRY_META, OrderHistoryItem, PendingOrder } from "@/types/trading";
 import CountryFlag from "@/components/CountryFlag";
 
@@ -41,7 +41,7 @@ export default function FrontPageOrders({
     <div className="space-y-4">
       <div className="bg-[#FFFFFF] border border-[#E0E3EB] rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 shadow-sm">
         <div className="flex flex-wrap items-center gap-1.5">
-          {(["ALL", "IND", "USA", "CANADA", "CHINA", "EU"] as const).map((code) => (
+          {(["ALL", "IND", "USA", "CANADA", "CHINA", "EU", "CRYPTO", "FOREX"] as const).map((code) => (
             <button
               key={code}
               type="button"
@@ -121,10 +121,10 @@ export default function FrontPageOrders({
                         <span className="text-[10px] font-mono text-[#787B86]">({o.product_type || "DELIVERY"})</span>
                       </td>
                       <td className="py-3 px-3 font-mono">{o.order_mode || "LIMIT"}</td>
-                      <td className="py-3 px-3 text-right font-mono font-bold">{o.quantity}</td>
-                      <td className="py-3 px-3 text-right font-mono font-bold">{formatAssetPrice(o.limit_price, o.currency)}</td>
+                      <td className="py-3 px-3 text-right font-mono font-bold">{formatQty(o.quantity)}</td>
+                      <td className="py-3 px-3 text-right font-mono font-bold">{formatAssetPrice(o.limit_price, o.currency, o.symbol)}</td>
                       <td className="py-3 px-3 text-right font-mono text-[10px] text-[#787B86]">
-                        SL: {o.stop_loss ? formatNumber(o.stop_loss, 2) : "—"} · TP: {o.take_profit ? formatNumber(o.take_profit, 2) : "—"}
+                        SL: {o.stop_loss ? formatNumber(o.stop_loss, getPricePrecision(o.stop_loss, o.symbol)) : "—"} · TP: {o.take_profit ? formatNumber(o.take_profit, getPricePrecision(o.take_profit, o.symbol)) : "—"}
                       </td>
                       <td className="py-3 px-3 text-center">
                         <div className="flex items-center justify-center gap-1.5">
@@ -191,8 +191,8 @@ export default function FrontPageOrders({
                           <span className={`font-bold ${h.type === "BUY" ? "text-[#089981]" : "text-[#F23645]"}`}>{h.type}</span>{" "}
                           <span className="text-[10px] font-mono text-[#787B86]">· {h.product_type || "DELIVERY"}</span>
                         </td>
-                        <td className="py-2.5 px-3 text-right font-mono">{h.quantity}</td>
-                        <td className="py-2.5 px-3 text-right font-mono font-bold">{formatAssetPrice(h.price, h.currency)}</td>
+                        <td className="py-2.5 px-3 text-right font-mono">{formatQty(h.quantity)}</td>
+                        <td className="py-2.5 px-3 text-right font-mono font-bold">{formatAssetPrice(h.price, h.currency, h.symbol)}</td>
                         <td className="py-2.5 px-3 text-right font-mono text-[#787B86]">
                           {formatMoney(h.brokerage ?? 0, h.currency)}
                         </td>
@@ -240,7 +240,7 @@ export default function FrontPageOrders({
                     <tr key={r.id} className="hover:bg-[#F8F9FD]">
                       <td className="py-2.5 px-3 font-mono text-[#787B86]">{r.created_at || r.timestamp}</td>
                       <td className="py-2.5 px-3 font-mono font-bold text-[#131722]">{r.symbol}</td>
-                      <td className="py-2.5 px-3 font-bold">{r.type} × {r.quantity}</td>
+                      <td className="py-2.5 px-3 font-bold">{r.type} × {formatQty(r.quantity)}</td>
                       <td className="py-2.5 px-3 font-mono font-bold text-[#F23645]">{r.status}</td>
                       <td className="py-2.5 px-3 text-[#787B86]">{r.reject_reason || "Cancelled by trader"}</td>
                     </tr>
@@ -279,7 +279,7 @@ export default function FrontPageOrders({
               <div className="flex justify-between">
                 <span className="text-[#787B86]">Execution</span>
                 <strong className="font-mono text-[#131722]">
-                  {selectedReceipt.type} {selectedReceipt.quantity} @ {formatAssetPrice(selectedReceipt.price, selectedReceipt.currency)}
+                  {selectedReceipt.type} {formatQty(selectedReceipt.quantity)} @ {formatAssetPrice(selectedReceipt.price, selectedReceipt.currency, selectedReceipt.symbol)}
                 </strong>
               </div>
               <div className="flex justify-between">
@@ -314,7 +314,7 @@ export default function FrontPageOrders({
             onClick={(e) => e.stopPropagation()}
             onSubmit={async (e) => {
               e.preventDefault();
-              await onModifyPending(editingOrder.id, parseFloat(modPrice), parseInt(modQty, 10));
+              await onModifyPending(editingOrder.id, parseFloat(modPrice), Math.max(0.0001, parseFloat(modQty) || 1));
               setEditingOrder(null);
             }}
             className="bg-[#FFFFFF] border border-[#E0E3EB] rounded-2xl shadow-2xl w-full max-w-sm p-5 space-y-4"
@@ -326,8 +326,8 @@ export default function FrontPageOrders({
                 <input type="number" step="any" required value={modPrice} onChange={(e) => setModPrice(e.target.value)} className="w-full bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl px-3 py-2 font-mono font-bold" />
               </div>
               <div>
-                <label className="font-semibold text-[#787B86] block mb-1">Quantity</label>
-                <input type="number" min="1" required value={modQty} onChange={(e) => setModQty(e.target.value)} className="w-full bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl px-3 py-2 font-mono font-bold" />
+                <label className="font-semibold text-[#787B86] block mb-1">Quantity / Units</label>
+                <input type="number" step="any" min="0.0001" required value={modQty} onChange={(e) => setModQty(e.target.value)} className="w-full bg-[#F8F9FD] border border-[#E0E3EB] rounded-xl px-3 py-2 font-mono font-bold" />
               </div>
             </div>
             <div className="flex justify-end gap-2">

@@ -120,10 +120,15 @@ self.onmessage = (e: MessageEvent<{ reqId: string; bars: Bar[]; chain: ChainStep
     series = runStep(step.fn, series, bars, step.period ?? 14, step.mult ?? 2);
   }
 
+  const midIdx = Math.floor(bars.length / 2);
+  const refPx = Math.abs(bars[bars.length - 1]?.close || bars[midIdx]?.close || 100);
+  const lastFn = (chain[chain.length - 1]?.fn || "").toLowerCase();
+  const isOsc = ["rsi", "macd", "macd_signal", "macd_hist", "stoch_k", "stoch_d"].includes(lastFn);
+  const dec = isOsc ? 4 : refPx < 0.0001 ? 8 : refPx < 0.01 ? 6 : refPx < 10 ? 5 : refPx < 500 ? 3 : 2;
   const points: Array<{ time: string | number; value: number }> = [];
   for (let i = 0; i < bars.length; i++) {
     if (!isNaN(series[i])) {
-      points.push({ time: bars[i].time, value: Number(series[i].toFixed(4)) });
+      points.push({ time: bars[i].time, value: Number(series[i].toFixed(dec)) });
     }
   }
   self.postMessage({ reqId, points });

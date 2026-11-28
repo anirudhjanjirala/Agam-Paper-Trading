@@ -74,7 +74,7 @@ class OrderModel(Base):
     status: Mapped[str] = mapped_column(String(16), default="FILLED", nullable=False)  # PENDING / FILLED / CANCELLED / REJECTED
     price: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    qty: Mapped[float] = mapped_column(Float, nullable=False)
     gross_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     charges: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     brokerage: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
@@ -114,7 +114,7 @@ class PositionModel(Base):
     leverage: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
     margin_blocked: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     entry_charges: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    qty: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    qty: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     avg_entry_price: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     current_price: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
@@ -143,7 +143,7 @@ class ClosedTradeModel(Base):
     currency: Mapped[str] = mapped_column(String(10), default="USD", nullable=False)
     product_type: Mapped[str] = mapped_column(String(16), default="DELIVERY", nullable=False)
     side: Mapped[str] = mapped_column(String(8), default="LONG", nullable=False)  # LONG / SHORT
-    qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    qty: Mapped[float] = mapped_column(Float, nullable=False)
     entry_price: Mapped[float] = mapped_column(Float, nullable=False)
     exit_price: Mapped[float] = mapped_column(Float, nullable=False)
     gross_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)

@@ -26,6 +26,8 @@ REGION_DEFAULT_CURRENCY: Dict[str, str] = {
     "CANADA": "CAD",
     "CHINA": "CNY",
     "EU": "EUR",
+    "CRYPTO": "USD",
+    "FOREX": "USD",
 }
 
 

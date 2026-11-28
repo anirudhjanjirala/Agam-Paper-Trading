@@ -55,7 +55,7 @@ REFRESH_COOKIE_NAME = "agam_refresh"
 ACCESS_TTL_SEC = 60 * 60 * 12  # 12 hours for local PC workstation
 REFRESH_TTL_DAYS = 30
 
-DEFAULT_SEEDED_WATCHLIST = ["RELIANCE.NS", "TCS.NS", "AAPL", "NVDA", "SHOP.TO", "600519.SS", "SAP.DE"]
+DEFAULT_SEEDED_WATCHLIST = ["RELIANCE.NS", "TCS.NS", "AAPL", "NVDA", "BTC-USD", "EURUSD=X", "SHOP.TO", "600519.SS", "SAP.DE"]
 
 
 def _b64url_encode(data: bytes) -> str:

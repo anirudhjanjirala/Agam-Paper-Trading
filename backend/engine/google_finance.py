@@ -58,7 +58,45 @@ SUFFIX_TO_GF_EXCHANGE: Dict[str, str] = {
     ".BR": "EBR",
     ".MI": "BIT",
     ".L": "LON",
+    ".SW": "SWX",
 }
+
+CRYPTO_QUOTES = ("-USD", "-USDT", "-EUR", "-GBP", "-BTC", "-ETH")
+
+
+def is_crypto_symbol(symbol: str) -> bool:
+    s = (symbol or "").strip().upper()
+    return any(s.endswith(q) for q in CRYPTO_QUOTES)
+
+
+def is_forex_symbol(symbol: str) -> bool:
+    return (symbol or "").strip().upper().endswith("=X")
+
+
+def smart_price_decimals(px: float, is_fx: bool = False) -> int:
+    ap = abs(float(px or 0.0))
+    if ap <= 0:
+        return 2
+    if ap < 0.0001:
+        return 8
+    if ap < 0.01:
+        return 6
+    if is_fx:
+        return 3 if ap >= 50.0 else 5
+    if ap < 10.0:
+        return 4
+    return 2
+
+
+def to_binance_pair(symbol: str) -> Optional[str]:
+    s = (symbol or "").strip().upper()
+    if s.endswith("-USD"):
+        return f"{s[:-4]}USDT"
+    if s.endswith("-USDT"):
+        return f"{s[:-5]}USDT"
+    if s.endswith(("-EUR", "-BTC", "-ETH")):
+        return s.replace("-", "")
+    return None
 
 
 def to_google_finance_ticker(symbol: str, exchange_hint: Optional[str] = None) -> List[str]:
@@ -68,10 +106,12 @@ def to_google_finance_ticker(symbol: str, exchange_hint: Optional[str] = None) -
         return [INDEX_MAP[sym]]
     if sym in BSE_SCRIP_MAP:
         return [BSE_SCRIP_MAP[sym]]
+    if is_crypto_symbol(sym):
+        return [sym[:-1] if sym.endswith("-USDT") else sym]
     if sym.endswith("=X") and len(sym) >= 8:
         base = sym[:-2]
         return [f"{base[:3]}-{base[3:6]}"]
-    if sym.endswith("=F") or sym.startswith("^"):
+    if sym.endswith("=F") or sym.startswith("^") or sym == "DX-Y.NYB":
         return []  # Futures / Yields route cleanly to public exchange chart fallback
 
     for suffix, gf_exch in SUFFIX_TO_GF_EXCHANGE.items():
@@ -108,6 +148,13 @@ class GoogleFinanceEngine:
         self._yahoo_cookie_ready: bool = False
         self._http_lock = threading.Lock()
         self._http_client: Optional[httpx.Client] = None
+        self._fx_lock = threading.Lock()
+        self._fx_usd_rates: Dict[str, float] = {}
+        self._fx_rates_ts: float = 0.0
+        self._fx_refreshing: bool = False
+        self._crypto_lock = threading.Lock()
+        self._crypto_tickers: Dict[str, dict] = {}
+        self._crypto_ts: float = 0.0
 
     def _get_http_client(self) -> httpx.Client:
         with self._http_lock:
@@ -162,26 +209,28 @@ class GoogleFinanceEngine:
                         pc = float(arr[15]) if arr[15] else px
                         chg = float(arr[8]) if isinstance(arr[8], (int, float)) else (px - pc)
                         pct = float(arr[10]) if isinstance(arr[10], (int, float)) else 0.0
-                        spread = round(max(0.01, px * 0.0002), 4 if px < 10 else 2)
+                        is_fx = is_forex_symbol(symbol)
+                        dec = smart_price_decimals(px, is_fx=is_fx)
+                        spread = round(max(10 ** (-dec), px * (0.00012 if is_fx else 0.00025)), dec)
                         curr = arr[12] if isinstance(arr[12], str) else ("PERCENT" if symbol.startswith("^TNX") else "USD")
                         quote_data = {
                             "symbol": symbol,
                             "gf_ticker": gf_ticker,
                             "name": arr[14],
-                            "exchange": gf_ticker.split(":")[1] if ":" in gf_ticker else "FX",
+                            "exchange": "BINANCE" if is_crypto_symbol(symbol) else (gf_ticker.split(":")[1] if ":" in gf_ticker else "FX"),
                             "currency": "GBp" if curr == "GBX" else curr,
-                            "price": round(px, 4 if px < 10 else 2),
-                            "prev_close": round(pc, 4 if pc < 10 else 2),
-                            "open": round(float(arr[2]), 4 if px < 10 else 2) if isinstance(arr[2], (int, float)) else px,
-                            "day_low": round(float(arr[4]), 4 if px < 10 else 2) if isinstance(arr[4], (int, float)) and arr[4] > 0 else px,
-                            "day_high": round(float(arr[5]), 4 if px < 10 else 2) if isinstance(arr[5], (int, float)) and arr[5] > 0 else px,
-                            "change": round(chg, 4 if px < 10 else 2),
+                            "price": round(px, dec),
+                            "prev_close": round(pc, dec),
+                            "open": round(float(arr[2]), dec) if isinstance(arr[2], (int, float)) else round(px, dec),
+                            "day_low": round(float(arr[4]), dec) if isinstance(arr[4], (int, float)) and arr[4] > 0 else round(px, dec),
+                            "day_high": round(float(arr[5]), dec) if isinstance(arr[5], (int, float)) and arr[5] > 0 else round(px, dec),
+                            "change": round(chg, dec),
                             "change_percent": round(pct, 2),
                             "market_cap": float(arr[16]) if len(arr) > 16 and isinstance(arr[16], (int, float)) and arr[16] > 0 else None,
                             "volume": int(arr[17]) if len(arr) > 17 and isinstance(arr[17], (int, float)) else 0,
                             "sector": arr[18] if len(arr) > 18 and isinstance(arr[18], str) else None,
-                            "bid": round(px - spread, 4 if px < 10 else 2),
-                            "ask": round(px + spread, 4 if px < 10 else 2),
+                            "bid": round(px - spread, dec),
+                            "ask": round(px + spread, dec),
                             "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
                             "timestamp": int(time.time()),
                             "source": "Google Finance",
@@ -229,12 +278,14 @@ class GoogleFinanceEngine:
                                 for b in raw_bars:
                                     iso_s = b[4]
                                     ts = int(datetime.fromisoformat(iso_s).timestamp())
+                                    c_b = float(b[1])
+                                    dec_b = smart_price_decimals(c_b, is_fx=is_forex_symbol(symbol))
                                     parsed_bars.append({
                                         "time": iso_s[:10] if is_daily_ohlc else ts,
-                                        "open": round(float(b[0]), 4 if float(b[0]) < 10 else 2),
-                                        "close": round(float(b[1]), 4 if float(b[1]) < 10 else 2),
-                                        "high": round(float(b[2]), 4 if float(b[2]) < 10 else 2),
-                                        "low": round(float(b[3]), 4 if float(b[3]) < 10 else 2),
+                                        "open": round(float(b[0]), dec_b),
+                                        "close": round(c_b, dec_b),
+                                        "high": round(float(b[2]), dec_b),
+                                        "low": round(float(b[3]), dec_b),
                                         "volume": int(b[5]) if len(b) > 5 and isinstance(b[5], (int, float)) else 0,
                                     })
                                 if parsed_bars:
@@ -267,7 +318,7 @@ class GoogleFinanceEngine:
                                         ts_val = last_ts + 60
                                     last_ts = ts_val
                                     val = float(px_arr[0])
-                                    dec = 4 if val < 10 else 2
+                                    dec = smart_price_decimals(val, is_fx=is_forex_symbol(symbol))
                                     v_r = round(val, dec)
                                     o_r = round(prev_val, dec) if prev_val is not None else v_r
                                     h_r = max(o_r, v_r)
@@ -630,6 +681,229 @@ class GoogleFinanceEngine:
                 continue
         return None
 
+    def _refresh_fx_usd_rates_sync(self) -> Dict[str, float]:
+        try:
+            r = self._get_http_client().get("https://api.frankfurter.dev/v1/latest?base=USD", timeout=6.0)
+            if r.status_code == 200:
+                rates = (r.json() or {}).get("rates") or {}
+                parsed = {"USD": 1.0, **{str(k).upper(): float(v) for k, v in rates.items() if isinstance(v, (int, float)) and v > 0}}
+                with self._fx_lock:
+                    self._fx_usd_rates = parsed
+                    self._fx_rates_ts = time.time()
+                    self._fx_refreshing = False
+                return dict(parsed)
+        except Exception:
+            pass
+        with self._fx_lock:
+            self._fx_refreshing = False
+            return dict(self._fx_usd_rates)
+
+    def get_fx_usd_rates(self, blocking: bool = False) -> Dict[str, float]:
+        """Returns 1 USD -> {CURR: rate} dictionary (non-blocking async refresh when stale)."""
+        fallback = {"USD": 1.0, "EUR": 0.94, "GBP": 0.79, "JPY": 152.0, "CHF": 0.88, "CAD": 1.40, "AUD": 1.53, "NZD": 1.69, "INR": 84.5, "CNY": 7.25}
+        now = time.time()
+        should_refresh = False
+        with self._fx_lock:
+            if self._fx_usd_rates and (now - self._fx_rates_ts) < 60.0:
+                return dict(self._fx_usd_rates)
+            if blocking:
+                self._fx_refreshing = True
+                should_refresh = True
+            elif not self._fx_refreshing:
+                self._fx_refreshing = True
+                should_refresh = True
+                cached = dict(self._fx_usd_rates) if self._fx_usd_rates else fallback
+            else:
+                cached = dict(self._fx_usd_rates) if self._fx_usd_rates else fallback
+        if blocking and should_refresh:
+            res = self._refresh_fx_usd_rates_sync()
+            return res or fallback
+        if should_refresh:
+            threading.Thread(target=self._refresh_fx_usd_rates_sync, daemon=True).start()
+        return cached
+
+    def fx_rate(self, base_curr: str, quote_curr: str) -> Optional[float]:
+        rates = self.get_fx_usd_rates()
+        b, q = base_curr.upper().strip(), quote_curr.upper().strip()
+        if b in rates and q in rates and rates[b] > 0:
+            return rates[q] / rates[b]
+        return None
+
+    def fetch_crypto_batch_sync(self) -> Dict[str, dict]:
+        """Fetches live 24hr stats for all Binance USDT & EUR spot pairs in one zero-cost call."""
+        now = time.time()
+        with self._crypto_lock:
+            if self._crypto_tickers and (now - self._crypto_ts) < 10.0:
+                return dict(self._crypto_tickers)
+        out: Dict[str, dict] = {}
+        try:
+            r = self._get_http_client().get("https://api.binance.com/api/v3/ticker/24hr", timeout=10.0)
+            if r.status_code == 200:
+                now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                now_ts = int(now)
+                for row in r.json():
+                    bsym = str(row.get("symbol") or "").upper()
+                    px = float(row.get("lastPrice") or 0.0)
+                    if px <= 0:
+                        continue
+                    norm_sym: Optional[str] = None
+                    curr = "USD"
+                    if bsym.endswith("USDT"):
+                        norm_sym = f"{bsym[:-4]}-USD"
+                    elif bsym.endswith("EUR"):
+                        norm_sym = f"{bsym[:-3]}-EUR"
+                        curr = "EUR"
+                    elif bsym in ("ETHBTC", "SOLBTC", "BNBBTC", "XRPBTC", "ADABTC", "DOGEBTC", "LTCBTC", "LINKBTC"):
+                        norm_sym = f"{bsym[:-3]}-BTC"
+                        curr = "USD"
+                    if not norm_sym:
+                        continue
+                    dec = smart_price_decimals(px, is_fx=False)
+                    pc = float(row.get("prevClosePrice") or px)
+                    chg = float(row.get("priceChange") or (px - pc))
+                    pct = float(row.get("priceChangePercent") or 0.0)
+                    bid = float(row.get("bidPrice") or 0.0) or round(px * 0.9998, dec)
+                    ask = float(row.get("askPrice") or 0.0) or round(px * 1.0002, dec)
+                    qvol = int(float(row.get("quoteVolume") or row.get("volume") or 0.0))
+                    out[norm_sym] = {
+                        "symbol": norm_sym,
+                        "name": norm_sym.split("-")[0],
+                        "exchange": "BINANCE",
+                        "currency": curr,
+                        "price": round(px, dec),
+                        "prev_close": round(pc, dec),
+                        "open": round(float(row.get("openPrice") or pc), dec),
+                        "day_high": round(float(row.get("highPrice") or px), dec),
+                        "day_low": round(float(row.get("lowPrice") or px), dec),
+                        "change": round(chg, dec),
+                        "change_percent": round(pct, 2),
+                        "volume": qvol,
+                        "bid": round(bid, dec),
+                        "ask": round(ask, dec),
+                        "as_of": now_iso,
+                        "timestamp": now_ts,
+                        "source": "Binance Spot Feed",
+                    }
+                with self._crypto_lock:
+                    self._crypto_tickers = out
+                    self._crypto_ts = now
+        except Exception:
+            with self._crypto_lock:
+                out = dict(self._crypto_tickers)
+        return out
+
+    def fetch_forex_quote_sync(self, symbol: str) -> Optional[dict]:
+        s = symbol.strip().upper()
+        if not s.endswith("=X") or len(s) < 8:
+            return None
+        base, quote_c = s[:-2][:3], s[:-2][3:6]
+        px = self.fx_rate(base, quote_c)
+        if not px or px <= 0:
+            return None
+        dec = smart_price_decimals(px, is_fx=True)
+        # Typical realistic FX interbank spread (Majors ~0.8 pip, JPY/Minors ~1.8 pip, Exotics wider)
+        pip = 0.01 if quote_c == "JPY" or px >= 50 else 0.0001
+        majors = {"EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X", "USDCAD=X", "AUDUSD=X", "NZDUSD=X"}
+        half_spread = pip * (0.45 if s in majors else 0.95)
+        return {
+            "symbol": s,
+            "name": f"{base}/{quote_c} FX",
+            "exchange": "FOREX",
+            "currency": "INR" if quote_c == "INR" else ("CAD" if s == "USDCAD=X" else ("CNY" if s == "USDCNY=X" else "USD")),
+            "price": round(px, dec),
+            "prev_close": round(px, dec),
+            "open": round(px, dec),
+            "day_high": round(px + half_spread * 2, dec),
+            "day_low": round(px - half_spread * 2, dec),
+            "change": 0.0,
+            "change_percent": 0.0,
+            "volume": 1000000,
+            "bid": round(px - half_spread, dec),
+            "ask": round(px + half_spread, dec),
+            "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            "timestamp": int(time.time()),
+            "source": "ECB / Frankfurter FX Cross",
+        }
+
+    def _fetch_binance_klines_sync(self, symbol: str, interval: str, period: str) -> List[dict]:
+        pair = to_binance_pair(symbol)
+        if not pair:
+            return []
+        iv_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d", "1wk": "1w", "1mo": "1M"}
+        b_iv = iv_map.get(interval, "1d")
+        is_intraday = interval in ("1m", "5m", "15m", "1h", "4h")
+        client = self._get_http_client()
+        try:
+            url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={b_iv}&limit=1000"
+            r = client.get(url, timeout=8.0)
+            if r.status_code != 200:
+                return []
+            raw = r.json()
+            if not isinstance(raw, list) or not raw:
+                return []
+            # If period == max on 1d, pull older chunk back another 1000 days so users see ~5.5+ yrs history
+            if period.lower() == "max" and b_iv == "1d" and len(raw) >= 950:
+                first_open_ms = int(raw[0][0])
+                r_old = client.get(
+                    f"https://api.binance.com/api/v3/klines?symbol={pair}&interval=1d&endTime={first_open_ms - 1}&limit=1000",
+                    timeout=8.0,
+                )
+                if r_old.status_code == 200 and isinstance(r_old.json(), list):
+                    raw = r_old.json() + raw
+
+            candles: List[dict] = []
+            seen = set()
+            for row in raw:
+                ts_sec = int(row[0] // 1000)
+                t_val: Any = ts_sec if is_intraday else datetime.fromtimestamp(ts_sec, tz=timezone.utc).strftime("%Y-%m-%d")
+                if t_val in seen:
+                    continue
+                seen.add(t_val)
+                o, h, l, c, vol = float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[7] or row[5] or 0)
+                dec = smart_price_decimals(c, is_fx=False)
+                candles.append({
+                    "time": t_val,
+                    "open": round(o, dec),
+                    "high": round(h, dec),
+                    "low": round(l, dec),
+                    "close": round(c, dec),
+                    "volume": int(vol),
+                })
+            return candles
+        except Exception:
+            return []
+
+    def _fetch_frankfurter_fx_history(self, symbol: str, interval: str, period: str) -> List[dict]:
+        s = symbol.strip().upper()
+        if not s.endswith("=X") or len(s) < 8:
+            return []
+        base, quote_c = s[:-2][:3], s[:-2][3:6]
+        if base == quote_c:
+            return []
+        days_map = {"1d": 7, "5d": 14, "1mo": 35, "3mo": 95, "6mo": 185, "ytd": 365, "1y": 370, "2y": 735, "5y": 1830, "max": 3650}
+        now_dt = datetime.now(timezone.utc).date()
+        start_dt = now_dt - timedelta(days=days_map.get(period.lower(), 365))
+        try:
+            url = f"https://api.frankfurter.dev/v1/{start_dt.strftime('%Y-%m-%d')}..{now_dt.strftime('%Y-%m-%d')}?base={base}&symbols={quote_c}"
+            r = self._get_http_client().get(url, timeout=8.0)
+            if r.status_code != 200:
+                return []
+            rates = (r.json() or {}).get("rates") or {}
+            bars: List[dict] = []
+            prev_val: Optional[float] = None
+            for d_str in sorted(rates.keys()):
+                val = (rates[d_str] or {}).get(quote_c)
+                if not isinstance(val, (int, float)) or val <= 0:
+                    continue
+                dec = smart_price_decimals(val, is_fx=True)
+                o = round(prev_val if prev_val is not None else val, dec)
+                c = round(float(val), dec)
+                prev_val = float(val)
+                bars.append({"time": d_str, "open": o, "high": max(o, c), "low": min(o, c), "close": c, "volume": 0})
+            return self._resample_daily(bars, interval) if interval in ("1wk", "1mo") else bars
+        except Exception:
+            return []
+
     def fetch_public_chart_sync(
         self,
         symbol: str,
@@ -641,12 +915,19 @@ class GoogleFinanceEngine:
         now = time.time()
         if not include_events:
             c = self._history_cache.get(cache_key)
-            if c and (now - c[0]) < self.history_ttl:
+            if c and (now - c[0]) < (30 if is_crypto_symbol(symbol) else self.history_ttl):
                 return {"candles": c[1], "meta": {}, "events": []}
+
+        # 0) Crypto fast-path: Binance Public Klines (exact 1m/5m/15m/1h/4h/1d/1w/1M, 0 rate limit)
+        if not include_events and is_crypto_symbol(symbol):
+            bin_bars = self._fetch_binance_klines_sync(symbol, interval, period)
+            if bin_bars:
+                self._history_cache[cache_key] = (now, bin_bars)
+                return {"candles": bin_bars, "meta": {"currency": "EUR" if symbol.upper().endswith("-EUR") else "USD", "exchangeName": "BINANCE"}, "events": []}
 
         # 1) Google Finance embedded series first (0 rate limits) for intraday / 1D / 5D / 1M
         bundle: Optional[dict] = None
-        if not include_events and (period in ("1d", "5d", "1mo") or interval in ("1m", "5m", "15m", "1h")):
+        if not include_events and (period in ("1d", "5d", "1mo") or interval in ("1m", "5m", "15m", "1h", "4h")):
             bundle = self.fetch_bundle_sync(symbol)
             if bundle:
                 if interval == "1m" and bundle["candles_1m"]:
@@ -664,6 +945,12 @@ class GoogleFinanceEngine:
                     rs = self._resample_intraday(base_bars, 3600)
                     self._history_cache[cache_key] = (now, rs)
                     return {"candles": rs, "meta": bundle["quote"], "events": []}
+                if interval == "4h" and (bundle["candles_5m"] or bundle["candles_1m"]):
+                    base_bars = bundle["candles_5m"] or bundle["candles_1m"]
+                    rs = self._resample_intraday(base_bars, 14400)
+                    if len(rs) >= 2:
+                        self._history_cache[cache_key] = (now, rs)
+                        return {"candles": rs, "meta": bundle["quote"], "events": []}
                 if interval == "1d" and bundle["candles_1d"]:
                     self._history_cache[cache_key] = (now, bundle["candles_1d"])
                     return {"candles": bundle["candles_1d"], "meta": bundle["quote"], "events": []}
@@ -679,10 +966,12 @@ class GoogleFinanceEngine:
         # 3) Public exchange chart feed (supports full listing-start history via period1=0..now)
         rng_map = {"1d": "1d", "5d": "5d", "1mo": "1mo", "3mo": "3mo", "6mo": "6mo", "ytd": "ytd", "1y": "1y", "2y": "2y", "5y": "5y", "max": "max"}
         rng = rng_map.get(period.lower(), "3mo")
-        payload = self._fetch_yahoo_chart_sync(symbol, interval, rng, include_events)
+        fetch_iv = "1h" if interval == "4h" else interval
+        fetch_rng = "1mo" if interval == "4h" else rng
+        payload = self._fetch_yahoo_chart_sync(symbol, fetch_iv, fetch_rng, include_events)
         result_list = ((payload or {}).get("chart") or {}).get("result") or []
         if not result_list and symbol.upper().endswith(".BO") and not include_events:
-            payload = self._fetch_yahoo_chart_sync(symbol[:-3] + ".NS", interval, rng, include_events)
+            payload = self._fetch_yahoo_chart_sync(symbol[:-3] + ".NS", fetch_iv, fetch_rng, include_events)
             result_list = ((payload or {}).get("chart") or {}).get("result") or []
         if not result_list and not include_events and interval in ("1d", "1wk", "1mo") and period.lower() in ("5y", "max"):
             nas_bars = self._fetch_nasdaq_history_sync(symbol, interval, period)
@@ -691,18 +980,27 @@ class GoogleFinanceEngine:
                 return {"candles": nas_bars, "meta": {}, "events": []}
 
         if not result_list:
-            # 4) Graceful fallback to Google Finance embedded daily/intraday bars instead of returning empty
+            # 4) Forex ECB Frankfurter historical fallback
+            if not include_events and is_forex_symbol(symbol):
+                fx_bars = self._fetch_frankfurter_fx_history(symbol, interval, period)
+                if fx_bars:
+                    self._history_cache[cache_key] = (now, fx_bars)
+                    return {"candles": fx_bars, "meta": {"exchangeName": "FOREX", "currency": "USD"}, "events": []}
+
+            # 5) Graceful fallback to Google Finance embedded daily/intraday bars instead of returning empty
             if not include_events:
                 if bundle is None:
                     bundle = self.fetch_bundle_sync(symbol)
                 if bundle:
                     fb: List[dict] = []
-                    if interval in ("1m", "5m", "15m", "1h"):
+                    if interval in ("1m", "5m", "15m", "1h", "4h"):
                         fb = bundle["candles_5m"] or bundle["candles_1m"] or bundle["candles_1d"]
                         if interval == "15m" and bundle["candles_5m"]:
                             fb = self._resample_intraday(bundle["candles_5m"], 900)
                         elif interval == "1h" and (bundle["candles_5m"] or bundle["candles_1m"]):
                             fb = self._resample_intraday(bundle["candles_5m"] or bundle["candles_1m"], 3600)
+                        elif interval == "4h" and (bundle["candles_5m"] or bundle["candles_1m"]):
+                            fb = self._resample_intraday(bundle["candles_5m"] or bundle["candles_1m"], 14400)
                     else:
                         fb = bundle["candles_1d"] or []
                         if interval in ("1wk", "1mo") and fb:
@@ -725,7 +1023,8 @@ class GoogleFinanceEngine:
             q0.get("volume") or [],
         )
 
-        is_intraday = interval in ("1m", "2m", "5m", "15m", "30m", "60m", "1h")
+        is_intraday = interval in ("1m", "2m", "5m", "15m", "30m", "60m", "1h", "4h")
+        is_fx = is_forex_symbol(symbol)
         seen = set()
         candles = []
         for i, ts in enumerate(ts_list):
@@ -736,7 +1035,7 @@ class GoogleFinanceEngine:
                 continue
             seen.add(t_val)
             c_v = float(closes[i])
-            dec = 4 if c_v < 10 else 2
+            dec = smart_price_decimals(c_v, is_fx=is_fx)
             candles.append({
                 "time": t_val,
                 "open": round(float(opens[i]), dec),
@@ -747,6 +1046,8 @@ class GoogleFinanceEngine:
             })
 
         candles.sort(key=lambda x: x["time"])
+        if interval == "4h" and candles:
+            candles = self._resample_intraday(candles, 14400)
         if candles and not include_events:
             self._history_cache[cache_key] = (now, candles)
 
@@ -762,7 +1063,12 @@ class GoogleFinanceEngine:
         return {"candles": candles, "meta": meta, "events": events}
 
     def fetch_quote_with_fallback(self, symbol: str, exchange_hint: Optional[str] = None) -> Optional[dict]:
-        """Primary: Google Finance live scrape. Fallback: public exchange chart/quote endpoint."""
+        """Primary: Binance (Crypto) / Google Finance live scrape. Fallback: Frankfurter (FX) / public exchange chart endpoint."""
+        if is_crypto_symbol(symbol):
+            crypto_map = self.fetch_crypto_batch_sync()
+            if symbol.upper() in crypto_map:
+                return crypto_map[symbol.upper()]
+
         bundle = self.fetch_bundle_sync(symbol, exchange_hint=exchange_hint)
         if bundle:
             return bundle["quote"]
@@ -780,28 +1086,32 @@ class GoogleFinanceEngine:
             candles = res.get("candles") or []
             meta = res.get("meta") or {}
         if not candles and not meta.get("regularMarketPrice"):
+            if is_forex_symbol(symbol):
+                return self.fetch_forex_quote_sync(symbol)
             return None
 
         px = float(meta.get("regularMarketPrice") or candles[-1]["close"])
         pc = float(meta.get("chartPreviousClose") or (candles[-2]["close"] if len(candles) >= 2 else px))
-        chg = round(px - pc, 4 if px < 10 else 2)
+        is_fx = is_forex_symbol(symbol)
+        dec = smart_price_decimals(px, is_fx=is_fx)
+        chg = round(px - pc, dec)
         pct = round((chg / pc) * 100.0, 2) if pc else 0.0
-        spread = round(max(0.01, px * 0.0002), 4 if px < 10 else 2)
+        spread = round(max(10 ** (-dec), px * (0.00012 if is_fx else 0.00025)), dec)
         return {
             "symbol": symbol,
             "name": meta.get("shortName") or meta.get("longName") or symbol,
             "exchange": meta.get("exchangeName") or exchange_hint or "Exchange",
             "currency": meta.get("currency") or "USD",
-            "price": round(px, 4 if px < 10 else 2),
-            "prev_close": round(pc, 4 if pc < 10 else 2),
-            "open": candles[-1]["open"] if candles else px,
+            "price": round(px, dec),
+            "prev_close": round(pc, dec),
+            "open": candles[-1]["open"] if candles else round(px, dec),
             "day_high": float(meta.get("regularMarketDayHigh") or (candles[-1]["high"] if candles else px)),
             "day_low": float(meta.get("regularMarketDayLow") or (candles[-1]["low"] if candles else px)),
             "change": chg,
             "change_percent": pct,
             "volume": int(meta.get("regularMarketVolume") or (candles[-1]["volume"] if candles else 0)),
-            "bid": round(px - spread, 4 if px < 10 else 2),
-            "ask": round(px + spread, 4 if px < 10 else 2),
+            "bid": round(px - spread, dec),
+            "ask": round(px + spread, dec),
             "as_of": str(candles[-1]["time"]) if candles else datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "timestamp": int(time.time()),
             "source": "Public Exchange Fallback",

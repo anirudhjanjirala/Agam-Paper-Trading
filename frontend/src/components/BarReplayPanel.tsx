@@ -2,8 +2,8 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createChart, ColorType, CandlestickSeries, IChartApi, ISeriesApi, Time } from "lightweight-charts";
-import { Play, Pause, SkipForward, SkipBack, RotateCcw, Shield } from "lucide-react";
-import { dedupeAscByTime, formatAssetPrice, formatNumber } from "@/lib/format";
+import { Play, Pause, SkipForward, SkipBack, RotateCcw, Shield, FastForward } from "lucide-react";
+import { dedupeAscByTime, formatAssetPrice, formatNumber, formatQty, getPricePrecision } from "@/lib/format";
 import { apiUrl } from "@/lib/api";
 import { useTheme } from "@/components/ThemeProvider";
 
@@ -27,17 +27,21 @@ interface ReplaySnapshot {
     realized_pnl: number;
     unrealized_pnl: number;
     total_equity: number;
+    return_pct?: number;
+    max_drawdown_pct?: number;
+    win_rate_pct?: number;
+    closed_trades?: number;
     trades: Array<{ side: string; qty: number; price: number; bar_time: string | number }>;
   };
 }
 
 export default function BarReplayPanel({ defaultSymbol }: { defaultSymbol: string }) {
   const { theme } = useTheme();
-  const [symbol] = useState(defaultSymbol);
+  const symbol = defaultSymbol;
   const [session, setSession] = useState<ReplaySnapshot | null>(null);
   const [playing, setPlaying] = useState(false);
   const [speedMs, setSpeedMs] = useState(900);
-  const [qty, setQty] = useState(10);
+  const [qtyStr, setQtyStr] = useState("1");
   const [tradeErr, setTradeErr] = useState<string | null>(null);
 
   const chartEl = useRef<HTMLDivElement>(null);
@@ -84,11 +88,12 @@ export default function BarReplayPanel({ defaultSymbol }: { defaultSymbol: strin
 
   const tradeReplay = async (side: "BUY" | "SELL") => {
     if (!session) return;
+    const q = Math.max(0.0001, parseFloat(qtyStr) || 1);
     setTradeErr(null);
     const res = await fetch(apiUrl(`/api/replay/${session.session_id}/trade`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ side, quantity: qty }),
+      body: JSON.stringify({ side, quantity: q }),
     });
     if (res.ok) {
       setSession(await res.json());
@@ -147,6 +152,10 @@ export default function BarReplayPanel({ defaultSymbol }: { defaultSymbol: strin
 
   useEffect(() => {
     if (!session || !seriesRef.current) return;
+    const prec = getPricePrecision(session.current_price, session.symbol);
+    seriesRef.current.applyOptions({
+      priceFormat: { type: "price", precision: prec, minMove: Number((10 ** -prec).toFixed(prec)) },
+    });
     seriesRef.current.setData(
       dedupeAscByTime(
         session.visible_bars.map((b) => ({
@@ -203,10 +212,19 @@ export default function BarReplayPanel({ defaultSymbol }: { defaultSymbol: strin
             onClick={() => session && stepBar(session.session_id, 1)}
             disabled={!session?.has_next}
             aria-label="Step Forward"
-            title="Step Forward"
+            title="Step Forward 1 Bar"
             className="p-2 bg-[#F8F9FD] border border-[#E0E3EB] rounded-lg text-[#131722] hover:bg-[#F0F3FA] disabled:opacity-40"
           >
             <SkipForward className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => session && stepBar(session.session_id, 5)}
+            disabled={!session?.has_next}
+            title="Skip +5 Bars"
+            className="px-2 py-1.5 bg-[#F8F9FD] border border-[#E0E3EB] rounded-lg text-[11px] font-mono font-bold text-[#131722] hover:bg-[#F0F3FA] disabled:opacity-40 inline-flex items-center gap-0.5"
+          >
+            <FastForward className="w-3 h-3" />+5
           </button>
           <select
             aria-label="Replay Playback Speed"
@@ -246,7 +264,7 @@ export default function BarReplayPanel({ defaultSymbol }: { defaultSymbol: strin
             <div className="flex justify-between text-[#787B86]">
               <span>Replay Price:</span>
               <span className="font-mono text-[#2962FF] font-bold">
-                {session ? formatAssetPrice(session.current_price, session.currency) : "--"}
+                {session ? formatAssetPrice(session.current_price, session.currency, session.symbol) : "--"}
               </span>
             </div>
             <div className="flex justify-between text-[#787B86]">
@@ -256,29 +274,52 @@ export default function BarReplayPanel({ defaultSymbol }: { defaultSymbol: strin
               </span>
             </div>
             <div className="flex justify-between text-[#787B86]">
-              <span>Position Qty:</span>
-              <span className="font-mono text-[#131722] font-bold">{session?.isolated_wallet.position_qty ?? 0}</span>
+              <span>Position (Long/Short):</span>
+              <span className={`font-mono font-bold ${(session?.isolated_wallet.position_qty ?? 0) < 0 ? "text-[#F23645]" : "text-[#131722]"}`}>
+                {formatQty(session?.isolated_wallet.position_qty ?? 0)}
+                {(session?.isolated_wallet.position_qty ?? 0) !== 0
+                  ? ` ${(session?.isolated_wallet.position_qty ?? 0) > 0 ? "LONG" : "SHORT"}`
+                  : ""}
+              </span>
             </div>
             <div className="flex justify-between text-[#787B86]">
-              <span>Unrealized P&L:</span>
+              <span>Unrealized P&amp;L:</span>
               <span className={`font-mono font-bold ${(session?.isolated_wallet.unrealized_pnl ?? 0) >= 0 ? "text-[#089981]" : "text-[#F23645]"}`}>
                 {formatNumber(session?.isolated_wallet.unrealized_pnl ?? 0, 2)}
               </span>
             </div>
             <div className="flex justify-between text-[#787B86]">
-              <span>Realized P&L:</span>
+              <span>Realized P&amp;L:</span>
               <span className={`font-mono font-bold ${(session?.isolated_wallet.realized_pnl ?? 0) >= 0 ? "text-[#089981]" : "text-[#F23645]"}`}>
                 {formatNumber(session?.isolated_wallet.realized_pnl ?? 0, 2)}
               </span>
             </div>
+            <div className="flex justify-between text-[#787B86] text-[10px] pt-1 border-t border-[#E0E3EB]">
+              <span>Ret: <strong>{session?.isolated_wallet.return_pct ?? 0}%</strong></span>
+              <span>Win: <strong>{session?.isolated_wallet.win_rate_pct ?? 0}%</strong></span>
+              <span>DD: <strong className="text-[#F23645]">-{session?.isolated_wallet.max_drawdown_pct ?? 0}%</strong></span>
+            </div>
           </div>
 
           <div className="space-y-2 pt-3 border-t border-[#E0E3EB]">
+            <div className="flex gap-1 text-[10px] font-mono">
+              {["0.01", "0.1", "1", "10", "1000"].map((q) => (
+                <button
+                  key={q}
+                  type="button"
+                  onClick={() => setQtyStr(q)}
+                  className="flex-1 py-0.5 rounded bg-[#FFFFFF] border border-[#E0E3EB] text-[#787B86] hover:text-[#2962FF] font-bold"
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
             <input
               type="number"
-              min={1}
-              value={qty}
-              onChange={(e) => setQty(Math.max(1, Number(e.target.value) || 1))}
+              step="any"
+              min="0.0001"
+              value={qtyStr}
+              onChange={(e) => setQtyStr(e.target.value)}
               className="w-full bg-[#FFFFFF] border border-[#E0E3EB] rounded-lg px-3 py-1.5 text-[#131722] font-mono"
             />
             {tradeErr && (
@@ -291,13 +332,13 @@ export default function BarReplayPanel({ defaultSymbol }: { defaultSymbol: strin
                 onClick={() => tradeReplay("BUY")}
                 className="py-2 rounded-lg bg-[#089981] hover:opacity-95 text-white font-bold"
               >
-                Replay BUY
+                Buy / Cover
               </button>
               <button
                 onClick={() => tradeReplay("SELL")}
                 className="py-2 rounded-lg bg-[#F23645] hover:opacity-95 text-white font-bold"
               >
-                Replay SELL
+                Sell / Short
               </button>
             </div>
           </div>

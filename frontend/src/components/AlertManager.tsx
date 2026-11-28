@@ -28,7 +28,8 @@ export default function AlertManager({
   defaultSymbol: string;
   compact?: boolean;
 }) {
-  const [symbol, setSymbol] = useState(defaultSymbol);
+  const [symDraft, setSymDraft] = useState<{ base: string; val: string } | null>(null);
+  const symbol = symDraft?.base === defaultSymbol ? symDraft.val : defaultSymbol;
   const [condition, setCondition] = useState("PRICE_ABOVE");
   const [threshold, setThreshold] = useState("");
   const [note, setNote] = useState("");
@@ -119,14 +120,14 @@ export default function AlertManager({
       >
         <input
           value={symbol}
-          onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-          placeholder="Symbol (AAPL)"
+          onChange={(e) => setSymDraft({ base: defaultSymbol, val: e.target.value.toUpperCase() })}
+          placeholder="Symbol (BTC-USD / AAPL)"
           aria-label="Alert Symbol"
           className="bg-[#F8F9FD] border border-[#E0E3EB] rounded-lg px-2.5 py-1.5 text-[#131722] font-mono font-bold outline-none focus:border-[#2962FF] min-w-0"
         />
         <input
           type="number"
-          step="0.01"
+          step="any"
           required
           value={threshold}
           onChange={(e) => setThreshold(e.target.value)}

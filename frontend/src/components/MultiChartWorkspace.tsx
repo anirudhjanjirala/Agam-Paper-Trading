@@ -13,16 +13,38 @@ import {
   Time,
 } from "lightweight-charts";
 import { Grid, Link2, Sliders } from "lucide-react";
-import { dedupeAscByTime } from "@/lib/format";
+import { dedupeAscByTime, getPricePrecision } from "@/lib/format";
 import { apiUrl } from "@/lib/api";
 import { useTheme } from "@/components/ThemeProvider";
 
 const DEFAULT_16_SYMBOLS = [
-  "RELIANCE.NS", "TCS.NS", "^NSEI", "HDFCBANK.NS",
-  "AAPL", "NVDA", "MSFT", "SPY",
-  "SHOP.TO", "RY.TO", "^GSPTSE", "ENB.TO",
+  "BTC-USD", "ETH-USD", "EURUSD=X", "USDJPY=X",
+  "RELIANCE.NS", "^NSEI", "AAPL", "NVDA",
+  "SOL-USD", "GC=F", "SHOP.TO", "SPY",
   "000001.SS", "600519.SS", "ASML.AS", "SAP.DE",
 ];
+
+const WORKSPACE_PRESETS: Record<string, string[]> = {
+  CROSS_ASSET: DEFAULT_16_SYMBOLS,
+  CRYPTO: [
+    "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD",
+    "XRP-USD", "ADA-USD", "DOGE-USD", "AVAX-USD",
+    "LINK-USD", "DOT-USD", "TON-USD", "TRX-USD",
+    "LTC-USD", "BCH-USD", "NEAR-USD", "UNI-USD",
+  ],
+  FOREX: [
+    "EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X",
+    "USDCAD=X", "AUDUSD=X", "NZDUSD=X", "DX-Y.NYB",
+    "EURGBP=X", "EURJPY=X", "GBPJPY=X", "EURCHF=X",
+    "AUDJPY=X", "CADJPY=X", "CHFJPY=X", "USDINR=X",
+  ],
+  INDIA_NSE: [
+    "^NSEI", "^NSEBANK", "^BSESN", "RELIANCE.NS",
+    "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
+    "SBIN.NS", "BHARTIARTL.NS", "GOLDBEES.NS", "NIFTYBEES.NS",
+    "USDINR=X", "EURINR=X", "LT.NS", "ITC.NS",
+  ],
+};
 
 interface SyncBar {
   time: Time;
@@ -68,22 +90,11 @@ function SyncChartTile({
   const barsRef = useRef<SyncBar[]>([]);
   const isSyncingRef = useRef(false);
 
-  const [editSym, setEditSym] = useState(symbol);
+  const [symDraft, setSymDraft] = useState<{ base: string; val: string } | null>(null);
+  const editSym = symDraft?.base === symbol ? symDraft.val : symbol;
   const { theme } = useTheme();
   const [tileStatus, setTileStatus] = useState<"loading" | "ready" | "error">("loading");
   const onCrosshairMoveRef = useRef(onCrosshairMove);
-
-  useEffect(() => {
-    if (!chartRef.current) return;
-    const isDark = theme === "dark";
-    chartRef.current.applyOptions({
-      layout: { background: { type: ColorType.Solid, color: isDark ? "#0B0E14" : "#FFFFFF" }, textColor: isDark ? "#D1D4DC" : "#131722" },
-      grid: { vertLines: { color: isDark ? "#1E222D" : "#F0F3FA" }, horzLines: { color: isDark ? "#1E222D" : "#F0F3FA" } },
-      rightPriceScale: { borderColor: isDark ? "#2A2E39" : "#E0E3EB" },
-      leftPriceScale: { borderColor: isDark ? "#2A2E39" : "#E0E3EB" },
-      timeScale: { borderColor: isDark ? "#2A2E39" : "#E0E3EB" },
-    });
-  }, [theme]);
 
   useEffect(() => {
     onCrosshairMoveRef.current = onCrosshairMove;
@@ -148,6 +159,18 @@ function SyncChartTile({
   }, [index]);
 
   useEffect(() => {
+    if (!chartRef.current) return;
+    const isDark = theme === "dark";
+    chartRef.current.applyOptions({
+      layout: { background: { type: ColorType.Solid, color: isDark ? "#0B0E14" : "#FFFFFF" }, textColor: isDark ? "#D1D4DC" : "#131722" },
+      grid: { vertLines: { color: isDark ? "#1E222D" : "#F0F3FA" }, horzLines: { color: isDark ? "#1E222D" : "#F0F3FA" } },
+      rightPriceScale: { borderColor: isDark ? "#2A2E39" : "#E0E3EB" },
+      leftPriceScale: { borderColor: isDark ? "#2A2E39" : "#E0E3EB" },
+      timeScale: { borderColor: isDark ? "#2A2E39" : "#E0E3EB" },
+    });
+  }, [theme, index]);
+
+  useEffect(() => {
     const controller = new AbortController();
     const interval = timeframe === "1d" ? "5m" : timeframe === "5d" ? "15m" : "1d";
     fetch(
@@ -164,6 +187,11 @@ function SyncChartTile({
         setTileStatus("ready");
         const cleanBars = dedupeAscByTime(bars as Array<{ time: string | number; open: number; high: number; low: number; close: number }>) as SyncBar[];
         barsRef.current = cleanBars;
+        const lastPx = cleanBars[cleanBars.length - 1]?.close || 100;
+        const prec = getPricePrecision(lastPx, symbol);
+        candleRef.current.applyOptions({
+          priceFormat: { type: "price", precision: prec, minMove: Number((10 ** -prec).toFixed(prec)) },
+        });
         candleRef.current.setData(cleanBars);
         chartRef.current?.timeScale().fitContent();
 
@@ -253,7 +281,7 @@ function SyncChartTile({
           <input
             aria-label={`Chart tile ${index + 1} symbol`}
             value={editSym}
-            onChange={(e) => setEditSym(e.target.value)}
+            onChange={(e) => setSymDraft({ base: symbol, val: e.target.value })}
             className="w-28 bg-[#F8F9FD] border border-[#E0E3EB] rounded px-1.5 py-0.5 text-[11px] font-mono font-bold text-[#131722] outline-none focus:border-[#2962FF]"
           />
         </form>
@@ -334,6 +362,25 @@ export default function MultiChartWorkspace() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2 text-xs">
+          <div className="flex bg-[#F8F9FD] border border-[#E0E3EB] rounded-lg p-1 font-bold text-[11px]">
+            {(
+              [
+                { id: "CROSS_ASSET", label: "Cross-Asset" },
+                { id: "CRYPTO", label: "Crypto Desk" },
+                { id: "FOREX", label: "Forex Matrix" },
+                { id: "INDIA_NSE", label: "India NSE" },
+              ] as const
+            ).map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setSymbols(WORKSPACE_PRESETS[p.id])}
+                className="px-2 py-1 rounded text-[#787B86] hover:text-[#2962FF] transition"
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
           <div className="flex bg-[#F8F9FD] border border-[#E0E3EB] rounded-lg p-1 font-mono font-bold">
             {([1, 2, 4, 8, 12, 16] as const).map((n) => (
               <button

@@ -264,4 +264,6 @@ export const COUNTRY_META: Record<string, CountryMeta> = {
   CANADA: { code: "CANADA", label: "Canada (TSX / TSXV)", short: "CAN", flag: "🇨🇦", currency: "CAD", indices: ["^GSPTSE", "XIU.TO", "USDCAD=X"] },
   CHINA: { code: "CHINA", label: "China (SSE / SZSE)", short: "CHN", flag: "🇨🇳", currency: "CNY", indices: ["000001.SS", "399001.SZ", "510300.SS"] },
   EU: { code: "EU", label: "Europe & UK (LSE / XETRA / Euronext)", short: "EU", flag: "🇪🇺", currency: "EUR", indices: ["^GDAXI", "^FTSE", "^FCHI"] },
+  CRYPTO: { code: "CRYPTO", label: "Crypto Spot & Perps (24/7)", short: "CRYPTO", flag: "₿", currency: "USD", indices: ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD"] },
+  FOREX: { code: "FOREX", label: "Global Forex (Majors & Minors)", short: "FOREX", flag: "FX", currency: "USD", indices: ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "DX-Y.NYB"] },
 };

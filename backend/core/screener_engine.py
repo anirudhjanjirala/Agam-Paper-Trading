@@ -36,7 +36,12 @@ def run_columnar_scan(store: GlobalUniverseStore, query: ScreenerQuery) -> dict:
         lf = store.df.lazy()
 
         if query.region and query.region != "ALL":
-            lf = lf.filter(pl.col("region") == query.region)
+            if query.region == "FOREX":
+                lf = lf.filter((pl.col("region") == "FOREX") | (pl.col("category") == "forex"))
+            elif query.region == "CRYPTO":
+                lf = lf.filter((pl.col("region") == "CRYPTO") | (pl.col("category") == "crypto"))
+            else:
+                lf = lf.filter(pl.col("region") == query.region)
         if query.category and query.category != "all":
             lf = lf.filter(pl.col("category") == query.category)
         if query.exchange:
@@ -61,11 +66,29 @@ def run_columnar_scan(store: GlobalUniverseStore, query: ScreenerQuery) -> dict:
         sort_col = query.sort_by if query.sort_by in {"volume", "change_percent", "price", "rsi_14", "symbol"} else "volume"
 
         matched_count = lf.select(pl.len()).collect().item()
-        df_out = (
-            lf.sort(sort_col, descending=query.descending)
-            .limit(min(query.limit, 500))
-            .collect()
-        )
+        if sort_col == "volume" and query.descending:
+            df_out = (
+                lf.with_columns(
+                    pl.when(pl.col("isin").is_in(["FX_MAJOR", "CRYPTO_MAJOR"]))
+                    .then(3)
+                    .when(pl.col("isin").is_in(["FX_MINOR", "CRYPTO_L1", "CRYPTO_DEFI"]))
+                    .then(2)
+                    .when(pl.col("isin").is_in(["FX_EXOTIC", "CRYPTO_MEME"]))
+                    .then(1)
+                    .otherwise(0)
+                    .alias("_tier_rank"),
+                )
+                .sort(["_tier_rank", "volume"], descending=[True, True], maintain_order=True)
+                .drop("_tier_rank")
+                .limit(min(query.limit, 500))
+                .collect()
+            )
+        else:
+            df_out = (
+                lf.sort(sort_col, descending=query.descending, maintain_order=True)
+                .limit(min(query.limit, 500))
+                .collect()
+            )
 
     elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
     return {

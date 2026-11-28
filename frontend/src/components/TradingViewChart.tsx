@@ -40,8 +40,9 @@ import {
   Eye,
   EyeOff,
   Download,
+  Camera,
 } from "lucide-react";
-import { dedupeAscByTime, formatAssetPrice, formatCompactCurrency, formatNumber } from "@/lib/format";
+import { dedupeAscByTime, formatAssetPrice, formatCompactCurrency, formatNumber, formatQty, getPricePrecision } from "@/lib/format";
 import { apiUrl, authFetch } from "@/lib/api";
 import { useTheme } from "@/components/ThemeProvider";
 import { Position } from "@/types/trading";
@@ -87,7 +88,7 @@ export type ChartStyle =
   | "line_break"
   | "range_bar"
   | "baseline";
-export type TimeframeKey = "10T" | "1s" | "5s" | "1m" | "5m" | "15m" | "1h" | "1D" | "1W" | "1M";
+export type TimeframeKey = "10T" | "1s" | "5s" | "1m" | "5m" | "15m" | "1h" | "4h" | "1D" | "1W" | "1M";
 
 interface TradingViewChartProps {
   symbol: string;
@@ -126,6 +127,7 @@ function mapTimeframeToParams(tf: TimeframeKey, rng: string): { interval: string
   if (tf === "5m") return { interval: "5m", period: "5d" };
   if (tf === "15m") return { interval: "15m", period: "5d" };
   if (tf === "1h") return { interval: "1h", period: "1mo" };
+  if (tf === "4h") return { interval: "4h", period: "3mo" };
   if (tf === "1W") {
     const p = rng === "1Y" ? "1y" : rng === "6M" ? "6mo" : rng === "5Y" ? "5y" : "max";
     return { interval: "1wk", period: p };
@@ -645,7 +647,7 @@ export default function TradingViewChart({
               lineWidth: 1,
               lineStyle: LineStyle.Solid,
               axisLabelVisible: true,
-              title: `${pos.order_type} ${pos.quantity} Avg`,
+              title: `${pos.order_type} ${formatQty(pos.quantity)} Avg`,
             })
           );
         }
@@ -689,6 +691,19 @@ export default function TradingViewChart({
     if (loadedChart.symbol !== symbol || loadedChart.candles.length === 0 || !mainSeriesRef.current) return;
 
     const bars = dedupeAscByTime(loadedChart.candles);
+    const samplePx = currentPrice || bars[bars.length - 1]?.close || 100;
+    const prec = getPricePrecision(samplePx, symbol);
+    try {
+      mainSeriesRef.current.applyOptions({
+        priceFormat: {
+          type: "price",
+          precision: prec,
+          minMove: Number((10 ** -prec).toFixed(prec)),
+        },
+      });
+    } catch {
+      // custom plugins handle own axis scale
+    }
     if (chartStyle === "line" || chartStyle === "area" || chartStyle === "baseline") {
       mainSeriesRef.current.setData(bars.map((c) => ({ time: c.time as Time, value: c.close })));
       if (chartStyle === "baseline" && bars.length > 0) {
@@ -863,8 +878,9 @@ export default function TradingViewChart({
 
   const isBullish = priceChange >= 0;
   const displayBar = hoverOhlc || loadedChart.candles[loadedChart.candles.length - 1];
-  const liveBid = bid ?? Number((currentPrice * 0.9998).toFixed(currentPrice < 10 ? 4 : 2));
-  const liveAsk = ask ?? Number((currentPrice * 1.0002).toFixed(currentPrice < 10 ? 4 : 2));
+  const pxPrec = getPricePrecision(currentPrice || displayBar?.close, symbol);
+  const liveBid = bid ?? Number((currentPrice * 0.9998).toFixed(pxPrec));
+  const liveAsk = ask ?? Number((currentPrice * 1.0002).toFixed(pxPrec));
   const spreadVal = Math.max(0, liveAsk - liveBid);
   const monogram = symbol.replace(/[^A-Z0-9]/gi, "").slice(0, 2).toUpperCase() || "AG";
   const activeChainLabel = activeChain.map((c) => `${c.fn.toUpperCase()}(${c.period})`).join(" → ");
@@ -981,7 +997,7 @@ export default function TradingViewChart({
                   {name} · {timeframe} · {exchange || "MKT"}
                 </button>
                 <span className="text-[11px] font-mono font-bold text-[#131722]">
-                  {formatAssetPrice(currentPrice, currency)}
+                  {formatAssetPrice(currentPrice, currency, symbol)}
                 </span>
                 <span
                   className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded ${
@@ -996,19 +1012,19 @@ export default function TradingViewChart({
               {displayBar && (
                 <div className="flex flex-wrap items-center gap-2 font-mono tabular-nums text-[11px] bg-[#FFFFFF]/90 backdrop-blur-[2px] px-1 rounded">
                   <span className="text-[#787B86]">
-                    O<strong className={`ml-0.5 ${isBullish ? "text-[#089981]" : "text-[#F23645]"}`}>{formatNumber(displayBar.open, displayBar.open < 10 ? 4 : 2)}</strong>
+                    O<strong className={`ml-0.5 ${isBullish ? "text-[#089981]" : "text-[#F23645]"}`}>{formatNumber(displayBar.open, pxPrec, pxPrec)}</strong>
                   </span>
                   <span className="text-[#787B86]">
-                    H<strong className={`ml-0.5 ${isBullish ? "text-[#089981]" : "text-[#F23645]"}`}>{formatNumber(displayBar.high, displayBar.high < 10 ? 4 : 2)}</strong>
+                    H<strong className={`ml-0.5 ${isBullish ? "text-[#089981]" : "text-[#F23645]"}`}>{formatNumber(displayBar.high, pxPrec, pxPrec)}</strong>
                   </span>
                   <span className="text-[#787B86]">
-                    L<strong className={`ml-0.5 ${isBullish ? "text-[#089981]" : "text-[#F23645]"}`}>{formatNumber(displayBar.low, displayBar.low < 10 ? 4 : 2)}</strong>
+                    L<strong className={`ml-0.5 ${isBullish ? "text-[#089981]" : "text-[#F23645]"}`}>{formatNumber(displayBar.low, pxPrec, pxPrec)}</strong>
                   </span>
                   <span className="text-[#787B86]">
-                    C<strong className={`ml-0.5 ${isBullish ? "text-[#089981]" : "text-[#F23645]"}`}>{formatNumber(displayBar.close, displayBar.close < 10 ? 4 : 2)}</strong>
+                    C<strong className={`ml-0.5 ${isBullish ? "text-[#089981]" : "text-[#F23645]"}`}>{formatNumber(displayBar.close, pxPrec, pxPrec)}</strong>
                   </span>
                   <span className={`font-bold ${isBullish ? "text-[#089981]" : "text-[#F23645]"}`}>
-                    {isBullish ? "+" : ""}{formatNumber(priceChange, 2)} ({isBullish ? "+" : ""}{(priceChangePercent ?? 0).toFixed(2)}%)
+                    {isBullish ? "+" : ""}{formatNumber(priceChange, pxPrec, pxPrec)} ({isBullish ? "+" : ""}{(priceChangePercent ?? 0).toFixed(2)}%)
                   </span>
                 </div>
               )}
@@ -1022,11 +1038,11 @@ export default function TradingViewChart({
                   onClick={() => onQuickOrder("SELL")}
                   className="px-2 py-0.5 rounded bg-[#FFFFFF]/95 hover:bg-[#F23645] text-[#F23645] hover:text-white border border-[#F23645] text-[11px] font-mono tabular-nums font-bold shadow-xs transition flex items-center gap-1.5"
                 >
-                  <span>{formatNumber(liveBid, currentPrice < 10 ? 4 : 2)}</span>
+                  <span>{formatNumber(liveBid, pxPrec, pxPrec)}</span>
                   <span className="text-[9px] uppercase tracking-wider">Sell</span>
                 </button>
                 <span className="text-[10px] font-mono text-[#787B86] bg-[#FFFFFF]/90 px-1 rounded tabular-nums">
-                  {formatNumber(spreadVal, currentPrice < 10 ? 4 : 2)}
+                  {formatNumber(spreadVal, pxPrec, pxPrec)}
                 </span>
                 <button
                   type="button"
@@ -1034,7 +1050,7 @@ export default function TradingViewChart({
                   className="px-2 py-0.5 rounded bg-[#FFFFFF]/95 hover:bg-[#2962FF] text-[#2962FF] hover:text-white border border-[#2962FF] text-[11px] font-mono tabular-nums font-bold shadow-xs transition flex items-center gap-1.5"
                 >
                   <span className="text-[9px] uppercase tracking-wider">Buy</span>
-                  <span>{formatNumber(liveAsk, currentPrice < 10 ? 4 : 2)}</span>
+                  <span>{formatNumber(liveAsk, pxPrec, pxPrec)}</span>
                 </button>
               </div>
             )}
@@ -1189,6 +1205,26 @@ export default function TradingViewChart({
               className="px-1.5 py-0.5 rounded font-sans text-[11px] font-semibold text-[#2962FF] hover:bg-[#F0F3FA] transition"
             >
               auto
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                try {
+                  const canvas = chartRef.current?.takeScreenshot();
+                  if (!canvas) return;
+                  const a = document.createElement("a");
+                  a.href = canvas.toDataURL("image/png");
+                  a.download = `${symbol.replace(/[^a-zA-Z0-9._-]/g, "_")}_${timeframe}.png`;
+                  a.click();
+                } catch {
+                  // ignore
+                }
+              }}
+              aria-label="Download Chart Snapshot PNG"
+              title="Snapshot Chart PNG"
+              className="p-1 rounded text-[#787B86] hover:text-[#2962FF] hover:bg-[#F0F3FA] transition"
+            >
+              <Camera className="w-3.5 h-3.5" />
             </button>
             <a
               href={apiUrl(

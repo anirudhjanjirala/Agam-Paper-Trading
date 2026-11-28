@@ -70,12 +70,14 @@ export default function RiskDisclaimerModal({
             <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-3.5 bg-slate-50/70 dark:bg-slate-900/40">
               <div className="font-extrabold text-slate-900 dark:text-white mb-1 flex items-center gap-1.5">
                 <Globe2 className="w-3.5 h-3.5 text-sky-500" />
-                3. USA / Canada / China / Europe &amp; UK Jurisdiction Notes
+                3. USA / Canada / China / Europe &amp; UK / Crypto &amp; Forex Notes
               </div>
               <p className="text-[11px] text-slate-600 dark:text-slate-400">
                 • <strong>USA (SEC/FINRA)</strong>: SEC Section 31 &amp; FINRA TAF models reflect current schedules; real margin accounts are subject to Reg-T &amp; Pattern Day Trader ($25k) rules.<br />
                 • <strong>China (SSE/SZSE)</strong>: Stamp duty &amp; transfer fees modeled; real A-shares obey T+1 delivery rules &amp; daily price bands.<br />
-                • <strong>EU/UK (ESMA/FCA)</strong>: UK Stamp Duty Reserve Tax (0.5%) &amp; FR/IT/BE FTT models apply; real leveraged CFDs carry high rapid-loss risk.
+                • <strong>EU/UK (ESMA/FCA)</strong>: UK Stamp Duty Reserve Tax (0.5%) &amp; FR/IT/BE FTT models apply; real leveraged CFDs carry high rapid-loss risk.<br />
+                • <strong>Crypto (24/7 Spot &amp; Perps)</strong>: Extreme volatility across fractional micro-cap &amp; major coins; paper perp liquidation levels (10x/20x) &amp; maker/taker fees are simulated for education.<br />
+                • <strong>Forex (24/5 FX Majors/Minors/Exotics)</strong>: Simulated ECN spreads, micro/mini/standard lots (0.01 = 1,000 units), and USD margin settlement across SYD/TYO/LON/NY sessions.
               </p>
             </div>
           </div>

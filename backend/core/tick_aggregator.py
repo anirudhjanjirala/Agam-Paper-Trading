@@ -11,7 +11,7 @@ Side = Literal["BUY", "SELL"]
 class Tick:
     symbol: str
     price: float
-    size: int
+    size: float
     ts_ms: int
     bid: Optional[float] = None
     ask: Optional[float] = None
@@ -26,12 +26,12 @@ class AggregatedBar:
     high: float
     low: float
     close: float
-    volume: int = 0
-    buy_volume: int = 0
-    sell_volume: int = 0
+    volume: float = 0.0
+    buy_volume: float = 0.0
+    sell_volume: float = 0.0
     tick_count: int = 0
     # Price-level Bid x Ask footprint inside this bar
-    footprint: Dict[float, Dict[str, int]] = field(default_factory=dict)
+    footprint: Dict[float, Dict[str, float]] = field(default_factory=dict)
 
     def to_dict(self, include_footprint: bool = False) -> dict:
         out = {
@@ -40,10 +40,10 @@ class AggregatedBar:
             "high": self.high,
             "low": self.low,
             "close": self.close,
-            "volume": self.volume,
-            "buy_volume": self.buy_volume,
-            "sell_volume": self.sell_volume,
-            "delta": self.buy_volume - self.sell_volume,
+            "volume": round(self.volume, 4),
+            "buy_volume": round(self.buy_volume, 4),
+            "sell_volume": round(self.sell_volume, 4),
+            "delta": round(self.buy_volume - self.sell_volume, 4),
             "tick_count": self.tick_count,
         }
         if include_footprint:
@@ -55,10 +55,10 @@ class AggregatedBar:
                 imbalance = "ASK_IMB" if (b > 0 and a >= b * 3) else ("BID_IMB" if (a > 0 and b >= a * 3) else "NONE")
                 levels.append({
                     "price": lvl,
-                    "bid_vol": b,
-                    "ask_vol": a,
-                    "delta": a - b,
-                    "total_vol": a + b,
+                    "bid_vol": round(b, 4),
+                    "ask_vol": round(a, 4),
+                    "delta": round(a - b, 4),
+                    "total_vol": round(a + b, 4),
                     "imbalance": imbalance,
                 })
             out["footprint"] = levels
@@ -127,17 +127,31 @@ def _parse_time_seconds(interval: str) -> Optional[int]:
 
 
 def _price_bucket(price: float) -> float:
-    if price < 5:
-        step = 0.01
-    elif price < 50:
-        step = 0.05
-    elif price < 500:
-        step = 0.5
-    elif price < 5000:
+    ap = abs(float(price or 0.0))
+    if ap <= 0:
+        return 0.0
+    if ap < 0.001:
+        step = max(ap * 0.002, 1e-8)
+        dec = 8
+    elif ap < 0.05:
+        step = 0.00005
+        dec = 6
+    elif ap < 5.0:
+        step = 0.0005
+        dec = 5
+    elif ap < 50.0:
+        step = 0.02
+        dec = 3
+    elif ap < 500.0:
+        step = 0.25
+        dec = 3
+    elif ap < 5000.0:
         step = 2.0
+        dec = 2
     else:
         step = 10.0
-    return round(round(price / step) * step, 4)
+        dec = 2
+    return round(round(price / step) * step, dec)
 
 
 class TickAggregator:
@@ -185,7 +199,7 @@ class TickAggregator:
                     )
             elif iv.endswith("R"):
                 # Range bar (e.g. 1.0R = new bar when High - Low > 1.0)
-                range_limit = max(0.0001, float(iv[:-1]))
+                range_limit = max(1e-8, float(iv[:-1]))
                 bar_ts = int(tick.ts_ms // 1000)
                 if not bars:
                     bars.append(

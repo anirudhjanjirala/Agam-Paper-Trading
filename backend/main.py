@@ -48,14 +48,16 @@ from core.quant_engine import (
     INDICATOR_CATALOG,
     compute_chained_indicator,
     compute_expected_move,
+    compute_technical_scorecard,
     compute_tpo_profile,
     compute_volume_footprint,
     compute_volume_profile,
     detect_patterns,
+    run_strategy_backtest,
 )
 from core.replay_engine import IsolatedReplayEngine
 from core.screener_engine import ScreenerQuery, run_columnar_scan
-from core.tax_brokerage import RATE_SYNC, calculate_order_charges, infer_country_and_sub
+from core.tax_brokerage import RATE_SYNC, calculate_order_charges, compute_fx_quote_to_settle, infer_country_and_sub
 from core.tenant_store import (
     TenantPortfolioService,
     create_trade_idea,
@@ -73,7 +75,7 @@ from core.tenant_store import (
 from core.tick_aggregator import Tick, TickAggregator
 from core.universe_loader import GlobalUniverseStore
 from core.ws_hub import RealtimeWebSocketHub
-from engine.google_finance import GoogleFinanceEngine
+from engine.google_finance import GoogleFinanceEngine, is_crypto_symbol, is_forex_symbol, smart_price_decimals
 from engine.google_news import GoogleNewsEngine
 
 app = FastAPI(title="Agam Local PC Paper Trading Terminal API", version="6.0.0")
@@ -146,10 +148,14 @@ PRIORITY_LIVE_SYMBOLS = [
     # CHINA
     "000001.SS", "399001.SZ", "600519.SS", "601318.SS", "300750.SZ",
     "510300.SS", "510050.SS", "159915.SZ", "511010.SS", "511260.SS", "518880.SS", "USDCNY=X",
-    # EU & UK
-    "ASML.AS", "SAP.DE", "MC.PA", "SHEL.L", "AZN.L", "HSBA.L",
+    # EU & UK & Swiss
+    "ASML.AS", "SAP.DE", "MC.PA", "SHEL.L", "AZN.L", "HSBA.L", "NESN.SW",
     "CSPX.L", "EXS1.DE", "IGLN.L",
-    "^GDAXI", "^FTSE", "^FCHI", "IGLT.L", "EUNH.DE", "EURUSD=X", "GBPUSD=X",
+    "^GDAXI", "^FTSE", "^FCHI", "^STOXX50E", "^SSMI", "IGLT.L", "EUNH.DE", "EURUSD=X", "GBPUSD=X",
+    # CRYPTO (24/7 Major Pairs)
+    "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD", "DOGE-USD", "ADA-USD", "AVAX-USD", "LINK-USD", "TON-USD",
+    # FOREX (Majors, Minors & DXY)
+    "EURGBP=X", "EURJPY=X", "GBPJPY=X", "AUDUSD=X", "NZDUSD=X", "USDCHF=X", "DX-Y.NYB",
 ]
 
 
@@ -180,18 +186,43 @@ def get_market_sessions() -> dict:
         active = is_weekday and ((open_h * 60 + open_m) <= cur_mins <= (close_h * 60 + close_m))
         return {"open": active, "local_time": local.strftime("%H:%M %Z"), "status": "OPEN" if active else "CLOSED"}
 
+    # Forex 24/5 global session calculation (Sunday 22:00 UTC -> Friday 22:00 UTC)
+    wd = now_utc.weekday()
+    hr_utc = now_utc.hour
+    fx_open = not (wd == 5 or (wd == 4 and hr_utc >= 22) or (wd == 6 and hr_utc < 22))
+    fx_hubs = []
+    if fx_open:
+        if hr_utc >= 21 or hr_utc < 6:
+            fx_hubs.append("SYD")
+        if 0 <= hr_utc < 9:
+            fx_hubs.append("TYO")
+        if 8 <= hr_utc < 17:
+            fx_hubs.append("LON")
+        if 13 <= hr_utc < 22:
+            fx_hubs.append("NY")
+
     return {
         "IND": is_open("Asia/Kolkata", 9, 15, 15, 30),
         "USA": is_open("America/New_York", 9, 30, 16, 0),
         "CANADA": is_open("America/Toronto", 9, 30, 16, 0),
         "CHINA": is_open("Asia/Shanghai", 9, 30, 15, 0),
         "EU": is_open("Europe/London", 8, 0, 16, 30),
+        "CRYPTO": {"open": True, "local_time": now_utc.strftime("%H:%M UTC"), "status": "24/7 LIVE"},
+        "FOREX": {
+            "open": fx_open,
+            "local_time": " + ".join(fx_hubs) if fx_hubs else now_utc.strftime("%H:%M UTC"),
+            "status": "24/5 OPEN" if fx_open else "WEEKEND",
+        },
     }
 
 
 def _sync_one_symbol(sym: str) -> Optional[dict]:
     meta = UNIVERSE.get_by_symbol(sym)
     exch_hint = meta.get("exchange") if meta else None
+    if is_crypto_symbol(sym):
+        crypto_map = GF_ENGINE.fetch_crypto_batch_sync()
+        if sym.upper() in crypto_map:
+            return crypto_map[sym.upper()]
     bundle = GF_ENGINE.fetch_bundle_sync(sym, exchange_hint=exch_hint)
     if bundle:
         q = dict(bundle["quote"])
@@ -205,7 +236,7 @@ def _sync_one_symbol(sym: str) -> Optional[dict]:
 
 
 def sync_batch_quotes(symbols: List[str]) -> None:
-    """Concurrently pulls live quotes from Google Finance + public exchange fallbacks."""
+    """Concurrently pulls live quotes from Google Finance + Binance Crypto + ECB FX + public exchange fallbacks."""
     global LAST_MARKET_SYNC
     if not symbols:
         return
@@ -213,18 +244,34 @@ def sync_batch_quotes(symbols: List[str]) -> None:
     now_ms = int(time.time() * 1000)
     updates: Dict[str, dict] = {}
     fired_alerts: List[dict] = []
+
+    # Refresh all Binance crypto 24h prices in 1 fast call (~150ms) and update top active pairs
+    crypto_batch = GF_ENGINE.fetch_crypto_batch_sync()
+    fx_rates = GF_ENGINE.get_fx_usd_rates()
+
+    non_crypto = [s for s in symbols if not is_crypto_symbol(s)]
+    for s in symbols:
+        if is_crypto_symbol(s) and s.upper() in crypto_batch:
+            updates[s.upper()] = dict(crypto_batch[s.upper()])
+    # Also keep top 40 highest-volume crypto pairs updated in LIVE_PRICES & UNIVERSE
+    top_crypto = sorted(crypto_batch.values(), key=lambda x: x.get("volume", 0), reverse=True)[:50]
+    for cq in top_crypto:
+        updates.setdefault(cq["symbol"], cq)
+
     with ThreadPoolExecutor(max_workers=12) as pool:
-        for res in pool.map(_sync_one_symbol, symbols):
+        for res in pool.map(_sync_one_symbol, non_crypto):
             if res and res.get("price", 0) > 0:
                 sym = res["symbol"]
                 updates[sym] = res
-                TICK_AGGREGATOR.ingest_tick(
-                    Tick(symbol=sym, price=res["price"], size=max(1, res.get("volume", 1000) // 1000), ts_ms=now_ms, bid=res.get("bid"), ask=res.get("ask")),
-                    intervals=["1s", "5s", "1m", "10T", "1R"],
-                )
-                for ev in ALERTS.evaluate_tick(sym, res["price"], res.get("rsi_14", 50.0)):
-                    ev["user_id"] = ALERT_USER_MAP.get(ev.get("rule_id", ""), "")
-                    fired_alerts.append(ev)
+
+    for sym, res in updates.items():
+        TICK_AGGREGATOR.ingest_tick(
+            Tick(symbol=sym, price=res["price"], size=max(1, res.get("volume", 1000) // 1000), ts_ms=now_ms, bid=res.get("bid"), ask=res.get("ask")),
+            intervals=["1s", "5s", "1m", "10T", "1R"],
+        )
+        for ev in ALERTS.evaluate_tick(sym, res["price"], res.get("rsi_14", 50.0)):
+            ev["user_id"] = ALERT_USER_MAP.get(ev.get("rule_id", ""), "")
+            fired_alerts.append(ev)
 
     if updates:
         with PRICE_LOCK:
@@ -232,7 +279,7 @@ def sync_batch_quotes(symbols: List[str]) -> None:
         UNIVERSE.update_quotes(updates)
 
         with SessionLocal() as db:
-            fill_events = TenantPortfolioService.evaluate_all_pending_and_stops(db, LIVE_PRICES)
+            fill_events = TenantPortfolioService.evaluate_all_pending_and_stops(db, LIVE_PRICES, fx_rates=fx_rates)
             for ev in fired_alerts:
                 uid = ev.get("user_id")
                 row = db.get(UserAlertModel, ev.get("rule_id")) if ev.get("rule_id") else None
@@ -318,18 +365,20 @@ def _starter_record(sym: str) -> dict:
     exch = "NASDAQ"
     reg = "USA"
     curr = "USD"
-    if sym.endswith("=X"):
-        cat, exch = "forex", "FOREX"
+    isin_tag = ""
+    if is_crypto_symbol(sym):
+        reg, exch, cat = "CRYPTO", "BINANCE", "crypto"
+        curr = "EUR" if sym.endswith("-EUR") else "USD"
+        isin_tag = "CRYPTO_MAJOR"
+    elif sym == "DX-Y.NYB":
+        reg, exch, cat, curr, isin_tag = "FOREX", "ICE", "forex", "USD", "FX_MAJOR"
+    elif sym.endswith("=X"):
+        cat = "forex"
         if "INR" in sym:
-            reg, curr = "IND", "INR"
-        elif "CAD" in sym:
-            reg, curr = "CANADA", "CAD"
-        elif "CNY" in sym:
-            reg, curr = "CHINA", "CNY"
-        elif "JPY" in sym:
-            reg, curr = "USA", "USD"
+            reg, exch, curr = "IND", "NSE-FX", "INR"
         else:
-            reg, curr = "EU", "USD"
+            reg, exch, curr = "FOREX", "FOREX", "USD"
+        isin_tag = "FX_MAJOR" if sym in ("EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X", "USDCAD=X", "AUDUSD=X", "NZDUSD=X") else "FX_MINOR"
     elif sym.endswith("=F"):
         reg, exch, cat, curr = "USA", "CME", "commodities", "USD"
     elif sym.startswith("^"):
@@ -338,7 +387,7 @@ def _starter_record(sym: str) -> dict:
             reg, exch, curr = "IND", ("BSE" if "BSE" in sym else "NSE"), "INR"
         elif sym == "^GSPTSE":
             reg, exch, curr = "CANADA", "TSX", "CAD"
-        elif sym in ("^GDAXI", "^FTSE", "^FCHI"):
+        elif sym in ("^GDAXI", "^FTSE", "^FCHI", "^STOXX50E", "^SSMI"):
             reg, exch, curr = "EU", ("LSE" if sym == "^FTSE" else "EU"), ("GBP" if sym == "^FTSE" else "EUR")
         else:
             reg, exch, curr = "USA", ("US Treasury" if cat == "bonds" else "INDEX"), "USD"
@@ -366,9 +415,9 @@ def _starter_record(sym: str) -> dict:
             cat = "bonds"
         elif sym.startswith(("510", "159")) or sym in ("000001.SS", "399001.SZ"):
             cat = "indices" if sym in ("000001.SS", "399001.SZ") else "etfs"
-    elif sym.endswith((".L", ".DE", ".AS", ".PA")):
+    elif sym.endswith((".L", ".DE", ".AS", ".PA", ".SW")):
         reg = "EU"
-        exch = "LSE" if sym.endswith(".L") else "XETRA" if sym.endswith(".DE") else "Euronext"
+        exch = "LSE" if sym.endswith(".L") else "XETRA" if sym.endswith(".DE") else "SIX" if sym.endswith(".SW") else "Euronext"
         curr = "USD" if sym in ("CSPX.L", "IGLN.L") else ("GBp" if sym.endswith(".L") else "EUR")
         if sym in ("IGLN.L",):
             cat = "commodities"
@@ -388,7 +437,7 @@ def _starter_record(sym: str) -> dict:
         "exchange": exch,
         "category": cat,
         "currency": curr,
-        "isin": "",
+        "isin": isin_tag,
         "price": 0.0,
         "prev_close": 0.0,
         "change": 0.0,
@@ -732,12 +781,13 @@ def _to_heikin_ashi(bars: List[dict]) -> List[dict]:
         ha_open = prev_open if i == 0 else (prev_open + prev_close) * 0.5
         ha_high = max(b["high"], ha_open, ha_close)
         ha_low = min(b["low"], ha_open, ha_close)
+        dec = smart_price_decimals(ha_close)
         ha.append({
             "time": b["time"],
-            "open": round(ha_open, 4 if ha_open < 10 else 2),
-            "high": round(ha_high, 4 if ha_high < 10 else 2),
-            "low": round(ha_low, 4 if ha_low < 10 else 2),
-            "close": round(ha_close, 4 if ha_close < 10 else 2),
+            "open": round(ha_open, dec),
+            "high": round(ha_high, dec),
+            "low": round(ha_low, dec),
+            "close": round(ha_close, dec),
             "volume": b.get("volume", 0),
         })
         prev_open, prev_close = ha_open, ha_close
@@ -767,9 +817,10 @@ def _price_step(bars: List[dict], divisor: float = 55.0) -> tuple[float, int]:
     highs = [b["high"] for b in bars]
     lows = [b["low"] for b in bars]
     avg_px = sum(b["close"] for b in bars) / max(1, len(bars))
-    dec = 4 if avg_px < 10 else 2
+    dec = smart_price_decimals(avg_px)
     rng = max(highs) - min(lows)
-    step = max(0.0005 if dec == 4 else 0.05, round(rng / divisor, dec))
+    min_step = 10 ** (-dec)
+    step = max(min_step, round(rng / divisor, dec))
     return step, dec
 
 
@@ -812,7 +863,7 @@ def _to_line_break(bars: List[dict], lines: int = 3) -> List[dict]:
     if not bars:
         return []
     avg_px = sum(b["close"] for b in bars) / max(1, len(bars))
-    dec = 4 if avg_px < 10 else 2
+    dec = smart_price_decimals(avg_px)
     blocks: List[dict] = []
     for idx, b in enumerate(bars):
         c = round(float(b["close"]), dec)
@@ -1094,21 +1145,21 @@ def universe_stats():
     return {
         "stats": UNIVERSE.stats,
         "last_ingested_at": UNIVERSE.last_ingested_at,
-        "regions": ["IND", "USA", "CANADA", "CHINA", "EU"],
+        "regions": ["IND", "USA", "CANADA", "CHINA", "EU", "CRYPTO", "FOREX"],
         "currencies": REGION_DEFAULT_CURRENCY,
     }
 
 
 @app.get("/api/universe/list")
-def universe_list(region: Optional[str] = "ALL", category: Optional[str] = "all", offset: int = 0, limit: int = 60):
-    return UNIVERSE.list_instruments(region=region, category=category, offset=offset, limit=min(limit, 500))
+def universe_list(region: Optional[str] = "ALL", category: Optional[str] = "all", tier: Optional[str] = "all", offset: int = 0, limit: int = 60):
+    return UNIVERSE.list_instruments(region=region, category=category, tier=tier, offset=offset, limit=min(limit, 500))
 
 
 @app.get("/api/assets")
-def get_assets(country: Optional[str] = None, category: Optional[str] = None, limit: int = 40):
+def get_assets(country: Optional[str] = None, category: Optional[str] = None, tier: Optional[str] = None, limit: int = 60):
     region_map = {"IN": "IND", "US": "USA", "CA": "CANADA", "CN": "CHINA"}
     region = region_map.get(country or "", country)
-    listing = UNIVERSE.list_instruments(region=region, category=category, offset=0, limit=limit)
+    listing = UNIVERSE.list_instruments(region=region, category=category, tier=tier, offset=0, limit=min(limit, 200))
     return listing["items"]
 
 
@@ -1131,20 +1182,27 @@ def search_stocks(q: str = Query(..., min_length=1), region: Optional[str] = "AL
                 if not sym or sym in seen:
                     continue
                 seen.add(sym)
-                reg = (
-                    "IND" if sym.endswith((".NS", ".BO"))
-                    else "CANADA" if sym.endswith((".TO", ".V"))
-                    else "CHINA" if sym.endswith((".SS", ".SZ"))
-                    else "EU" if sym.endswith((".L", ".DE", ".PA", ".AS", ".BR", ".MI"))
-                    else "USA"
-                )
-                curr = "GBp" if sym.endswith(".L") else REGION_DEFAULT_CURRENCY.get(reg, "USD")
+                qt = (item.get("quoteType") or "").upper()
+                if qt == "CRYPTOCURRENCY" or is_crypto_symbol(sym):
+                    reg, cat, curr = "CRYPTO", "crypto", ("EUR" if sym.endswith("-EUR") else "USD")
+                elif qt == "CURRENCY" or sym.endswith("=X"):
+                    reg, cat, curr = "FOREX", "forex", ("INR" if "INR" in sym else "USD")
+                else:
+                    reg = (
+                        "IND" if sym.endswith((".NS", ".BO"))
+                        else "CANADA" if sym.endswith((".TO", ".V"))
+                        else "CHINA" if sym.endswith((".SS", ".SZ"))
+                        else "EU" if sym.endswith((".L", ".DE", ".PA", ".AS", ".BR", ".MI", ".SW"))
+                        else "USA"
+                    )
+                    cat = "etfs" if qt == "ETF" else "indices" if qt == "INDEX" else "stocks"
+                    curr = "GBp" if sym.endswith(".L") else REGION_DEFAULT_CURRENCY.get(reg, "USD")
                 local_hits.append({
                     "symbol": sym,
                     "name": item.get("shortname") or item.get("longname") or sym,
                     "region": reg,
                     "exchange": item.get("exchDisp") or item.get("exchange") or "MKT",
-                    "category": "etfs" if item.get("quoteType") == "ETF" else "indices" if item.get("quoteType") == "INDEX" else "stocks",
+                    "category": cat,
                     "currency": curr,
                     "price": 0.0,
                     "change_percent": 0.0,
@@ -1158,15 +1216,23 @@ def search_stocks(q: str = Query(..., min_length=1), region: Optional[str] = "AL
 def get_quote(symbol: str):
     meta = UNIVERSE.get_by_symbol(symbol)
     if not meta:
-        reg = (
-            "IND" if symbol.endswith((".NS", ".BO"))
-            else "CANADA" if symbol.endswith((".TO", ".V"))
-            else "CHINA" if symbol.endswith((".SS", ".SZ"))
-            else "EU" if symbol.endswith((".L", ".DE", ".PA", ".AS", ".BR", ".MI"))
-            else "USA"
-        )
-        curr = "GBp" if symbol.endswith(".L") else REGION_DEFAULT_CURRENCY.get(reg, "USD")
-        meta = {"symbol": symbol, "name": symbol, "region": reg, "exchange": "Market", "category": "stocks", "currency": curr, "isin": ""}
+        if is_crypto_symbol(symbol):
+            reg, cat, exch = "CRYPTO", "crypto", "BINANCE"
+            curr = "EUR" if symbol.upper().endswith("-EUR") else "USD"
+        elif is_forex_symbol(symbol) or symbol.upper() == "DX-Y.NYB":
+            reg, cat, exch = ("IND" if "INR" in symbol.upper() else "FOREX"), "forex", "FOREX"
+            curr = "INR" if "INR" in symbol.upper() else "USD"
+        else:
+            reg = (
+                "IND" if symbol.endswith((".NS", ".BO"))
+                else "CANADA" if symbol.endswith((".TO", ".V"))
+                else "CHINA" if symbol.endswith((".SS", ".SZ"))
+                else "EU" if symbol.endswith((".L", ".DE", ".PA", ".AS", ".BR", ".MI", ".SW"))
+                else "USA"
+            )
+            cat, exch = "stocks", "Market"
+            curr = "GBp" if symbol.endswith(".L") else REGION_DEFAULT_CURRENCY.get(reg, "USD")
+        meta = {"symbol": symbol, "name": symbol, "region": reg, "exchange": exch, "category": cat, "currency": curr, "isin": ""}
         UNIVERSE._upsert_records([{**meta, "price": 0.0, "prev_close": 0.0, "change": 0.0, "change_percent": 0.0, "volume": 0, "rsi_14": 50.0, "as_of": ""}])
 
     with PRICE_LOCK:
@@ -1195,15 +1261,17 @@ def get_quote(symbol: str):
             meta = UNIVERSE.get_by_symbol(symbol) or meta
 
     if not quote:
-        raise HTTPException(status_code=404, detail=f"Live Google Finance / exchange quote unavailable for {symbol}")
+        raise HTTPException(status_code=404, detail=f"Live quote unavailable for {symbol}")
 
     px = float(quote.get("price") or 0.0)
-    spread = round(max(0.01, px * 0.0002), 4 if px < 10 else 2)
+    is_fx = is_forex_symbol(symbol)
+    dec = smart_price_decimals(px, is_fx=is_fx)
+    spread = round(max(10 ** (-dec), px * (0.00012 if is_fx else 0.00025)), dec)
     return {
         **meta,
         **quote,
-        "bid": quote.get("bid", round(px - spread, 4 if px < 10 else 2)),
-        "ask": quote.get("ask", round(px + spread, 4 if px < 10 else 2)),
+        "bid": quote.get("bid", round(px - spread, dec)),
+        "ask": quote.get("ask", round(px + spread, dec)),
         "country": meta.get("region", "USA"),
     }
 
@@ -1250,10 +1318,12 @@ async def get_symbol_news(symbol: str, limit: int = 20):
     meta = UNIVERSE.get_by_symbol(symbol)
     company_name = meta.get("name") if meta else symbol
     region = meta.get("region") if meta else (
-        "IND" if symbol.endswith((".NS", ".BO"))
+        "CRYPTO" if is_crypto_symbol(symbol)
+        else "FOREX" if is_forex_symbol(symbol)
+        else "IND" if symbol.endswith((".NS", ".BO"))
         else "CANADA" if symbol.endswith((".TO", ".V"))
         else "CHINA" if symbol.endswith((".SS", ".SZ"))
-        else "EU" if symbol.endswith((".L", ".DE", ".PA", ".AS", ".BR", ".MI"))
+        else "EU" if symbol.endswith((".L", ".DE", ".PA", ".AS", ".BR", ".MI", ".SW"))
         else "USA"
     )
     articles = await NEWS_ENGINE.fetch_symbol_news(symbol, company_name=company_name, region=region, limit=min(limit, 25))
@@ -1319,6 +1389,46 @@ def get_order_flow(symbol: str, interval: str = "15m", period: str = "5d"):
         "tpo_profile": compute_tpo_profile(bars, num_bins=20),
         "footprint": compute_volume_footprint(bars, levels_per_bar=6),
     }
+
+
+@app.get("/api/asset/{symbol}/technicals")
+def get_asset_technicals(symbol: str, interval: str = "1d", period: str = "6mo"):
+    bars = _load_candles(symbol, interval=interval, period=period)
+    primary = compute_technical_scorecard(bars)
+    mtf: Dict[str, dict] = {}
+    for tf, per in (("15m", "5d"), ("1h", "1mo"), ("4h", "3mo"), ("1d", "1y")):
+        try:
+            tf_bars = bars if (tf == interval and len(bars) >= 25) else _load_candles(symbol, interval=tf, period=per)
+            sc = compute_technical_scorecard(tf_bars)
+            mtf[tf] = {"rating": sc.get("rating", "NEUTRAL"), "score": sc.get("score", 0.0), "buy": sc.get("buy", 0), "sell": sc.get("sell", 0)}
+        except Exception:
+            mtf[tf] = {"rating": "NEUTRAL", "score": 0.0, "buy": 0, "sell": 0}
+    return {"symbol": symbol, "interval": interval, **primary, "mtf": mtf}
+
+
+class BacktestRequest(BaseModel):
+    symbol: str
+    interval: str = "1d"
+    period: str = "1y"
+    strategy: str = "ema_cross"
+    initial_capital: float = 100000.0
+    fee_bps: float = 5.0
+    allow_short: bool = True
+
+
+@app.post("/api/backtest")
+def run_backtest_endpoint(req: BacktestRequest):
+    bars = _load_candles(req.symbol, interval=req.interval, period=req.period)
+    meta = UNIVERSE.get_by_symbol(req.symbol)
+    curr = meta["currency"] if meta else "USD"
+    res = run_strategy_backtest(
+        bars=bars,
+        strategy=req.strategy,
+        initial_capital=req.initial_capital,
+        fee_bps=req.fee_bps,
+        allow_short=req.allow_short,
+    )
+    return {"symbol": req.symbol, "interval": req.interval, "period": req.period, "currency": curr, **res}
 
 
 @app.post("/api/screener/scan")
@@ -1738,7 +1848,7 @@ class ReplayStartRequest(BaseModel):
 
 class ReplayTradeRequest(BaseModel):
     side: str
-    quantity: int
+    quantity: float
 
 
 @app.post("/api/replay/start")
@@ -1746,8 +1856,10 @@ def start_replay(req: ReplayStartRequest):
     bars = _load_candles(req.symbol, interval=req.interval, period=req.period)
     meta = UNIVERSE.get_by_symbol(req.symbol)
     curr = meta["currency"] if meta else "USD"
+    last_px = float(bars[-1]["close"]) if bars else 0.0
+    fx_scale = compute_fx_quote_to_settle(req.symbol, curr, last_px, GF_ENGINE.get_fx_usd_rates())
     replay_cash = req.initial_cash if req.initial_cash != 100000.0 else DEFAULT_WALLETS.get(curr, 100000.0)
-    return REPLAY.start_session(req.symbol, req.interval, curr, bars, req.start_ratio, replay_cash).snapshot()
+    return REPLAY.start_session(req.symbol, req.interval, curr, bars, req.start_ratio, replay_cash, fx_scale=fx_scale).snapshot()
 
 
 @app.post("/api/replay/{session_id}/step")
@@ -1802,12 +1914,12 @@ def get_portfolio(
     db: Session = Depends(get_db),
     current_user: UserModel = Depends(require_authenticated_user),
 ):
-    return TenantPortfolioService.get_snapshot(db, current_user.id, LIVE_PRICES)
+    return TenantPortfolioService.get_snapshot(db, current_user.id, LIVE_PRICES, fx_rates=GF_ENGINE.get_fx_usd_rates())
 
 
 class ChargePreviewRequest(BaseModel):
     symbol: str
-    quantity: int = 1
+    quantity: float = 1.0
     price: Optional[float] = None
     order_type: str = "BUY"
     product_type: str = "DELIVERY"
@@ -1820,7 +1932,7 @@ class ChargePreviewRequest(BaseModel):
 
 class OrderRequest(BaseModel):
     symbol: str
-    quantity: int
+    quantity: float
     order_type: str
     order_mode: str = "MARKET"
     product_type: str = "DELIVERY"
@@ -1834,7 +1946,7 @@ class OrderRequest(BaseModel):
 
 class ModifyOrderRequest(BaseModel):
     limit_price: Optional[float] = None
-    quantity: Optional[int] = None
+    quantity: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
 
@@ -1879,7 +1991,8 @@ def _resolve_symbol_context(symbol: str, quote: Optional[dict] = None, meta: Opt
     if symbol.upper().endswith(".L") and curr not in ("USD", "GBP", "GBp"):
         curr = "GBp"
     exch = (meta or {}).get("exchange") or (quote or {}).get("exchange") or inferred_exch
-    cat = (meta or {}).get("category") or "stocks"
+    default_cat = "crypto" if inferred_country == "CRYPTO" else ("forex" if inferred_country == "FOREX" else "stocks")
+    cat = (meta or {}).get("category") or default_cat
     name = (meta or {}).get("name")
     if not name or name == symbol:
         name = (quote or {}).get("name") or symbol
@@ -1908,17 +2021,20 @@ def preview_order_charges(req: ChargePreviewRequest):
     if px <= 0 and meta and float(meta.get("price") or 0) > 0:
         px = float(meta["price"])
     ctx = _resolve_symbol_context(req.symbol, quote=quote, meta=meta)
+    settle_curr = req.currency or ctx["currency"]
+    fx_scale = compute_fx_quote_to_settle(req.symbol, settle_curr, px, usd_rates=GF_ENGINE.get_fx_usd_rates())
     bd = calculate_order_charges(
         symbol=req.symbol,
-        quantity=max(1, req.quantity),
+        quantity=max(1e-8, float(req.quantity)),
         price=px,
         side=req.order_type,
         product_type=req.product_type,
         broker_plan=req.broker_plan,
         region=req.country or ctx["country"],
         exchange=req.exchange or ctx["exchange"],
-        currency=req.currency or ctx["currency"],
+        currency=settle_curr,
         category=req.category or ctx["category"],
+        fx_quote_to_settle=fx_scale,
     )
     return bd.to_dict()
 
@@ -1963,6 +2079,7 @@ def place_order(
             exchange=ctx["exchange"],
             category=ctx["category"],
             notes=order.notes,
+            fx_rates=GF_ENGINE.get_fx_usd_rates(),
         )
         log_activity(
             db,
@@ -1986,6 +2103,91 @@ def place_order(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+class LadderOrderRequest(BaseModel):
+    symbol: str
+    total_quantity: float
+    order_type: str
+    product_type: str = "DELIVERY"
+    broker_plan: str = "DISCOUNT"
+    price_start: float
+    price_end: float
+    rungs: int = 4
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    notes: str = ""
+
+
+@app.post("/api/orders/ladder")
+def place_ladder_orders(
+    req: LadderOrderRequest,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(require_authenticated_user),
+):
+    rungs = max(2, min(8, int(req.rungs)))
+    if req.total_quantity <= 0 or req.price_start <= 0 or req.price_end <= 0:
+        raise HTTPException(status_code=400, detail="Ladder requires positive quantity and price band.")
+
+    meta = UNIVERSE.get_by_symbol(req.symbol)
+    with PRICE_LOCK:
+        quote = LIVE_PRICES.get(req.symbol)
+    if not quote or quote.get("price", 0) <= 0:
+        quote = GF_ENGINE.fetch_quote_with_fallback(req.symbol, exchange_hint=meta.get("exchange") if meta else None)
+        if quote:
+            with PRICE_LOCK:
+                LIVE_PRICES[req.symbol] = quote
+    if not quote or float(quote.get("price") or 0) <= 0:
+        raise HTTPException(status_code=404, detail=f"Live quote unavailable for {req.symbol}")
+
+    ctx = _resolve_symbol_context(req.symbol, quote=quote, meta=meta)
+    fx_rates = GF_ENGINE.get_fx_usd_rates()
+    per_qty = round(float(req.total_quantity) / rungs, 6)
+    p0, p1 = float(req.price_start), float(req.price_end)
+    step = (p1 - p0) / (rungs - 1) if rungs > 1 else 0.0
+
+    placed: List[dict] = []
+    for idx in range(rungs):
+        rung_px = p0 + step * idx
+        mode = "LIMIT"
+        try:
+            res = TenantPortfolioService.place_order(
+                db=db,
+                user_id=current_user.id,
+                symbol=req.symbol,
+                name=ctx["name"],
+                currency=ctx["currency"],
+                quantity=per_qty,
+                order_type=req.order_type,
+                order_mode=mode,
+                live_price=float(quote["price"]),
+                limit_price=rung_px,
+                stop_loss=req.stop_loss,
+                take_profit=req.take_profit,
+                product_type=req.product_type,
+                broker_plan=req.broker_plan,
+                country=ctx["country"],
+                exchange=ctx["exchange"],
+                category=ctx["category"],
+                notes=req.notes or f"Ladder Rung {idx + 1}/{rungs}",
+                fx_rates=fx_rates,
+            )
+            placed.append(res)
+        except ValueError as e:
+            if not placed:
+                raise HTTPException(status_code=400, detail=str(e))
+            break
+
+    log_activity(
+        db,
+        current_user.id,
+        "TRADE",
+        "ORDER_LADDER",
+        symbol=req.symbol.upper(),
+        details=f"{req.order_type} {len(placed)}/{rungs} rungs [{p0} -> {p1}] qty={req.total_quantity}",
+    )
+    WS_HUB.schedule_user_event(MAIN_EVENT_LOOP, current_user.id, {"type": "PORTFOLIO_UPDATE"})
+    return {"status": "LADDER_PLACED", "rungs_placed": len(placed), "orders": placed, "message": f"Placed {len(placed)} staggered limit rungs for {req.symbol}."}
+
+
 @app.patch("/api/orders/{order_id}")
 def modify_pending_order_endpoint(
     order_id: str,
@@ -1995,7 +2197,7 @@ def modify_pending_order_endpoint(
 ):
     try:
         res = TenantPortfolioService.modify_pending_order(
-            db, current_user.id, order_id, req.limit_price, req.quantity, req.stop_loss, req.take_profit
+            db, current_user.id, order_id, req.limit_price, req.quantity, req.stop_loss, req.take_profit, fx_rates=GF_ENGINE.get_fx_usd_rates()
         )
         log_activity(db, current_user.id, "TRADE", "MODIFY_ORDER", details=f"Order {order_id} updated")
         WS_HUB.schedule_user_event(MAIN_EVENT_LOOP, current_user.id, {"type": "PORTFOLIO_UPDATE", **res})
@@ -2041,13 +2243,60 @@ def update_position_risk_endpoint(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.post("/api/positions/{position_id}/reverse")
+def reverse_position_endpoint(
+    position_id: str,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(require_authenticated_user),
+):
+    from core.models import PositionModel
+    pos = db.scalar(select(PositionModel).where(PositionModel.id == position_id, PositionModel.user_id == current_user.id))
+    if not pos:
+        raise HTTPException(status_code=404, detail="Position not found")
+    with PRICE_LOCK:
+        quote = LIVE_PRICES.get(pos.symbol)
+    px = float(quote["price"]) if quote and quote.get("price", 0) > 0 else float(pos.current_price or pos.avg_entry_price)
+    try:
+        res = TenantPortfolioService.reverse_position(
+            db, current_user.id, position_id, live_price=px, fx_rates=GF_ENGINE.get_fx_usd_rates()
+        )
+        log_activity(
+            db,
+            current_user.id,
+            "TRADE",
+            "REVERSE_POSITION",
+            symbol=pos.symbol,
+            details=f"Flipped {pos.qty} {pos.symbol} -> {res.get('new_side')} @ {px}",
+        )
+        WS_HUB.schedule_user_event(MAIN_EVENT_LOOP, current_user.id, {"type": "PORTFOLIO_UPDATE", **res})
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/portfolio/risk-analytics")
+def get_portfolio_risk_analytics(
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(require_authenticated_user),
+):
+    return TenantPortfolioService.compute_portfolio_risk_analytics(
+        db, current_user.id, LIVE_PRICES, fx_rates=GF_ENGINE.get_fx_usd_rates()
+    )
+
+
 @app.post("/api/positions/square-off-all")
 def square_off_all_endpoint(
     req: Optional[SquareOffAllRequest] = None,
     db: Session = Depends(get_db),
     current_user: UserModel = Depends(require_authenticated_user),
 ):
-    res = TenantPortfolioService.square_off_all(db, current_user.id, LIVE_PRICES, country=req.country if req else None)
+    res = TenantPortfolioService.square_off_all(
+        db,
+        current_user.id,
+        LIVE_PRICES,
+        country=req.country if req else None,
+        fx_rates=GF_ENGINE.get_fx_usd_rates(),
+    )
     log_activity(
         db,
         current_user.id,

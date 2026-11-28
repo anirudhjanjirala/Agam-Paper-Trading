@@ -1,15 +1,16 @@
 "use client";
 
 import React from "react";
-import { ChevronUp, ChevronDown, Maximize2, Minimize2, Terminal, Filter, Layers, PlayCircle } from "lucide-react";
+import { ChevronUp, ChevronDown, Maximize2, Minimize2, Terminal, Filter, Layers, PlayCircle, FlaskConical } from "lucide-react";
 import PositionsTable from "@/components/PositionsTable";
 import ScreenerPanel from "@/components/ScreenerPanel";
 import OrderFlowSuite from "@/components/OrderFlowSuite";
 import BarReplayPanel from "@/components/BarReplayPanel";
+import BacktestLab from "@/components/BacktestLab";
 import { formatNumber, getCurrencySymbol } from "@/lib/format";
 import { OrderHistoryItem, PendingOrder, Position } from "@/types/trading";
 
-export type BottomDrawerTab = "paper" | "screener" | "orderflow" | "replay";
+export type BottomDrawerTab = "paper" | "screener" | "orderflow" | "replay" | "backtest";
 
 interface BottomTerminalDrawerProps {
   isOpen: boolean;
@@ -26,6 +27,7 @@ interface BottomTerminalDrawerProps {
   ordersHistory: OrderHistoryItem[];
   rejectedOrders?: OrderHistoryItem[];
   onClosePosition: (symbol: string, quantity: number, orderType: string, productType?: string) => void;
+  onReversePosition?: (positionId: string) => void;
   onCancelPending: (orderId: string) => void;
   onSquareOffAll?: () => void;
   onSelectSymbolFromScreener: (symbol: string) => void;
@@ -46,6 +48,7 @@ export default function BottomTerminalDrawer({
   ordersHistory,
   rejectedOrders = [],
   onClosePosition,
+  onReversePosition,
   onCancelPending,
   onSquareOffAll,
   onSelectSymbolFromScreener,
@@ -70,11 +73,12 @@ export default function BottomTerminalDrawer({
   const currSym = getCurrencySymbol(activeCurrency);
   const equity = walletBalance + openPositionEquity;
 
-  const tabs: Array<{ id: BottomDrawerTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
-    { id: "paper", label: `Paper Trading (${positions.length})`, icon: Terminal },
-    { id: "screener", label: "Stock Screener", icon: Filter },
-    { id: "orderflow", label: "Order Flow Suite", icon: Layers },
-    { id: "replay", label: "Bar Replay", icon: PlayCircle },
+  const tabs: Array<{ id: BottomDrawerTab; label: string; title: string; icon: React.ComponentType<{ className?: string }> }> = [
+    { id: "paper", label: `Paper (${positions.length})`, title: `Paper Trading (${positions.length})`, icon: Terminal },
+    { id: "screener", label: "Screener", title: "Market Screener", icon: Filter },
+    { id: "orderflow", label: "Order Flow", title: "Order Flow Suite", icon: Layers },
+    { id: "replay", label: "Bar Replay", title: "Bar Replay Studio", icon: PlayCircle },
+    { id: "backtest", label: "Backtester", title: "Strategy Backtester Lab", icon: FlaskConical },
   ];
 
   const handleTabClick = (tab: BottomDrawerTab) => {
@@ -84,7 +88,7 @@ export default function BottomTerminalDrawer({
 
   return (
     <div
-      className={`bg-[#FFFFFF] flex flex-col shrink-0 border-t border-[#E0E3EB] transition-all ${
+      className={`relative z-30 bg-[#FFFFFF] flex flex-col shrink-0 border-t border-[#E0E3EB] transition-all ${
         !isOpen ? "h-[38px]" : isExpanded ? "h-[400px]" : "h-[235px]"
       }`}
     >
@@ -98,8 +102,9 @@ export default function BottomTerminalDrawer({
               <button
                 key={t.id}
                 type="button"
+                title={t.title}
                 onClick={() => handleTabClick(t.id)}
-                className={`px-2.5 py-1.5 text-xs font-bold flex items-center gap-1.5 border-b-2 transition whitespace-nowrap ${
+                className={`px-2 py-1.5 text-xs font-bold flex items-center gap-1 border-b-2 transition whitespace-nowrap shrink-0 ${
                   active
                     ? "border-[#131722] text-[#131722]"
                     : "border-transparent text-[#787B86] hover:text-[#131722]"
@@ -174,6 +179,7 @@ export default function BottomTerminalDrawer({
               ordersHistory={ordersHistory}
               rejectedOrders={rejectedOrders}
               onClosePosition={onClosePosition}
+              onReversePosition={onReversePosition}
               onCancelPending={onCancelPending}
               onSquareOffAll={onSquareOffAll}
             />
@@ -186,6 +192,9 @@ export default function BottomTerminalDrawer({
           )}
           {activeTab === "replay" && (
             <BarReplayPanel key={selectedSymbol} defaultSymbol={selectedSymbol} />
+          )}
+          {activeTab === "backtest" && (
+            <BacktestLab defaultSymbol={selectedSymbol} />
           )}
         </div>
       )}

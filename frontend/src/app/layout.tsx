@@ -6,7 +6,7 @@ import { AuthProvider } from "@/components/AuthProvider";
 export const metadata: Metadata = {
   title: "Agam Paper Trading | Global Multi-Asset Trading & Analytics",
   description:
-    "Open-source institutional multi-tenant paper trading platform and corporate fundamentals workspace across India, USA, Canada, China, and Europe.",
+    "Open-source institutional multi-tenant paper trading platform and corporate fundamentals workspace across Global Equities, Commodities, Bonds, Crypto 24/7, and Forex 24/5.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

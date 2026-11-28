@@ -140,6 +140,17 @@ def get_asset_overview(
             candles = bundle["candles_1d"]
 
         returns, sparkline, prev_ref = _compute_rolling_returns(candles)
+        yr_candles = candles[-365:] if len(candles) > 10 else candles
+        computed_52w_hi = max((float(c["high"]) for c in yr_candles), default=None) if yr_candles else None
+        computed_52w_lo = min((float(c["low"]) for c in yr_candles), default=None) if yr_candles else None
+        cat_l = str((universe_meta or {}).get("category") or "").lower()
+        default_sector = (
+            "Digital Assets (24/7)" if cat_l == "crypto"
+            else "Foreign Exchange (24/5)" if cat_l == "forex"
+            else "Commodities & Futures" if cat_l == "commodities"
+            else "Fixed Income & Yields" if cat_l == "bonds"
+            else "Multi-Asset"
+        )
 
         cached = {
             "symbol": symbol,
@@ -147,7 +158,7 @@ def get_asset_overview(
             "exchange": quote_b.get("exchange") or exch_hint or "Exchange",
             "region": (universe_meta or {}).get("region") or "USA",
             "currency": quote_b.get("currency") or (universe_meta or {}).get("currency") or "USD",
-            "sector": prof.get("sector") or quote_b.get("sector") or "Multi-Asset",
+            "sector": prof.get("sector") or quote_b.get("sector") or default_sector,
             "industry": prof.get("industry") or (universe_meta or {}).get("category", "Equity").title(),
             "ceo": prof.get("ceo"),
             "ceo_title": "Chief Executive Officer" if prof.get("ceo") else None,
@@ -162,8 +173,8 @@ def get_asset_overview(
             "forward_pe": None,
             "dividend_yield": prof.get("dividend_yield"),
             "beta": None,
-            "week_52_high": prof.get("week_52_high"),
-            "week_52_low": prof.get("week_52_low"),
+            "week_52_high": prof.get("week_52_high") or computed_52w_hi,
+            "week_52_low": prof.get("week_52_low") or computed_52w_lo,
             "shares_outstanding": prof.get("shares_outstanding"),
             "volume": quote_b.get("volume") or prof.get("volume"),
             "returns": returns,

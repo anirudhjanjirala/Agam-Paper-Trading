@@ -84,6 +84,26 @@ export default function CountryFlag({ code = "ALL", className = "w-4 h-3" }: Cou
     );
   }
 
+  if (norm === "CRYPTO") {
+    return (
+      <svg viewBox="0 0 24 16" className={`inline-block shrink-0 rounded-[2px] border border-amber-500/40 ${className}`} aria-label="Crypto Market">
+        <rect width="24" height="16" fill="#0F172A" />
+        <circle cx="12" cy="8" r="5.6" fill="#F59E0B" />
+        <path d="M10.4 5.2H13.1C14.1 5.2 14.7 5.7 14.7 6.5C14.7 7.1 14.3 7.6 13.7 7.8C14.5 8 15 8.6 15 9.4C15 10.3 14.2 10.9 13.1 10.9H10.4V5.2ZM11.6 7.4H12.9C13.3 7.4 13.6 7.1 13.6 6.7C13.6 6.3 13.3 6.1 12.9 6.1H11.6V7.4ZM11.6 9.9H13C13.5 9.9 13.8 9.6 13.8 9.2C13.8 8.7 13.5 8.4 13 8.4H11.6V9.9Z" fill="#0F172A" />
+      </svg>
+    );
+  }
+
+  if (norm === "FOREX" || norm === "FX") {
+    return (
+      <svg viewBox="0 0 24 16" className={`inline-block shrink-0 rounded-[2px] border border-sky-500/40 ${className}`} aria-label="Forex Market">
+        <rect width="24" height="16" fill="#0284C7" />
+        <path d="M4 5.5H16M13.5 3.2L16 5.5L13.5 7.8" stroke="#FFFFFF" strokeWidth="1.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M20 10.5H8M10.5 8.2L8 10.5L10.5 12.8" stroke="#BAE6FD" strokeWidth="1.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+
   if (norm === "EU") {
     return (
       <svg viewBox="0 0 24 16" className={`inline-block shrink-0 rounded-[2px] border border-black/15 ${className}`} aria-label="EU flag">

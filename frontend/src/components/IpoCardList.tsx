@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import { Rocket, Sparkles, CheckCircle2, RefreshCw } from "lucide-react";
+import CountryFlag from "@/components/CountryFlag";
 
 export interface IpoItem {
   id: string;
@@ -35,12 +36,14 @@ export default function IpoCardList({ ipos, onApplyBid, loading = false, error =
   };
 
   const getCountryFlag = (c: string) => {
-    if (c === "IN" || c === "IND") return "🇮🇳 India (NSE)";
-    if (c === "US" || c === "USA") return "🇺🇸 USA (NASDAQ)";
-    if (c === "CANADA") return "🇨🇦 Canada (TSX)";
-    if (c === "CHINA") return "🇨🇳 China (SSE/SZSE)";
-    if (c === "EU") return "🇪🇺 Europe";
-    return "🌍 Global";
+    if (c === "IN" || c === "IND") return <span className="inline-flex items-center gap-1.5"><CountryFlag code="IND" /> India (NSE)</span>;
+    if (c === "US" || c === "USA") return <span className="inline-flex items-center gap-1.5"><CountryFlag code="USA" /> USA (NASDAQ)</span>;
+    if (c === "CANADA") return <span className="inline-flex items-center gap-1.5"><CountryFlag code="CANADA" /> Canada (TSX)</span>;
+    if (c === "CHINA") return <span className="inline-flex items-center gap-1.5"><CountryFlag code="CHINA" /> China (SSE/SZSE)</span>;
+    if (c === "EU") return <span className="inline-flex items-center gap-1.5"><CountryFlag code="EU" /> Europe</span>;
+    if (c === "CRYPTO") return <span className="inline-flex items-center gap-1.5"><CountryFlag code="CRYPTO" /> Crypto</span>;
+    if (c === "FOREX") return <span className="inline-flex items-center gap-1.5"><CountryFlag code="FOREX" /> Forex</span>;
+    return <span className="inline-flex items-center gap-1.5"><CountryFlag code="ALL" /> Global</span>;
   };
 
   return (

@@ -115,7 +115,7 @@ export default function FrontPageFeed({
     <div className="space-y-4">
       <div className="bg-[#FFFFFF] border border-[#E0E3EB] rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 shadow-sm">
         <div className="flex flex-wrap items-center gap-1.5">
-          {(["ALL", "IND", "USA", "CANADA", "CHINA", "EU"] as const).map((code) => (
+          {(["ALL", "IND", "USA", "CANADA", "CHINA", "EU", "CRYPTO", "FOREX"] as const).map((code) => (
             <button
               key={code}
               type="button"
@@ -218,9 +218,9 @@ export default function FrontPageFeed({
                     <button type="button" onClick={() => onOpenSymbol(idea.symbol)} className="font-black text-[#2962FF] hover:underline">
                       {idea.symbol} ({idea.timeframe})
                     </button>
-                    <span>Idea: <strong>{formatAssetPrice(idea.entry_price, idea.currency)}</strong></span>
+                    <span>Idea: <strong>{formatAssetPrice(idea.entry_price, idea.currency, idea.symbol)}</strong></span>
                     <span className={perfBull ? "text-[#089981] font-bold" : "text-[#F23645] font-bold"}>
-                      Live: {formatAssetPrice(idea.current_price, idea.currency)} ({perfBull ? "+" : ""}{idea.change_since_idea_pct}%)
+                      Live: {formatAssetPrice(idea.current_price, idea.currency, idea.symbol)} ({perfBull ? "+" : ""}{idea.change_since_idea_pct}%)
                     </span>
                   </div>
 
@@ -229,12 +229,12 @@ export default function FrontPageFeed({
                   <div className="flex flex-wrap gap-2 text-[11px] font-mono">
                     {idea.target_price && (
                       <span className="px-2 py-0.5 rounded bg-[#E8F5E9] text-[#089981] font-bold">
-                        Target: {formatAssetPrice(idea.target_price, idea.currency)}
+                        Target: {formatAssetPrice(idea.target_price, idea.currency, idea.symbol)}
                       </span>
                     )}
                     {idea.stop_loss && (
                       <span className="px-2 py-0.5 rounded bg-[#FFEBEE] text-[#F23645] font-bold">
-                        SL: {formatAssetPrice(idea.stop_loss, idea.currency)}
+                        SL: {formatAssetPrice(idea.stop_loss, idea.currency, idea.symbol)}
                       </span>
                     )}
                   </div>

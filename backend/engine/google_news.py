@@ -18,6 +18,8 @@ REGION_LOCALE: Dict[str, Dict[str, str]] = {
     "CANADA": {"hl": "en-CA", "gl": "CA", "ceid": "CA:en"},
     "CHINA": {"hl": "en-SG", "gl": "SG", "ceid": "SG:en"},
     "EU": {"hl": "en-GB", "gl": "GB", "ceid": "GB:en"},
+    "CRYPTO": {"hl": "en-US", "gl": "US", "ceid": "US:en"},
+    "FOREX": {"hl": "en-US", "gl": "US", "ceid": "US:en"},
 }
 
 POS_KEYWORDS = (
@@ -86,9 +88,20 @@ class GoogleNewsEngine:
             return cached[1][:limit]
 
         loc = REGION_LOCALE.get(region.upper(), REGION_LOCALE["USA"])
-        clean_sym = symbol.split(".")[0].lstrip("^")
+        sym_u = symbol.upper().strip()
+        clean_sym = sym_u.split(".")[0].lstrip("^")
         clean_co = (company_name or "").replace("Limited", "").replace("Ltd", "").strip()
-        q_str = f"{clean_sym} {clean_co} stock".strip() if clean_co and clean_co.upper() != clean_sym.upper() else f"{clean_sym} stock"
+        if region.upper() == "CRYPTO" or sym_u.endswith(("-USD", "-USDT", "-EUR", "-GBP", "-BTC")):
+            base = sym_u.split("-")[0]
+            coin_name = clean_co.split("(")[0].strip() if clean_co else base
+            q_str = f"{coin_name} {base} crypto cryptocurrency" if coin_name.upper() != base else f"{base} crypto cryptocurrency"
+        elif region.upper() == "FOREX" or sym_u.endswith("=X") or sym_u == "DX-Y.NYB":
+            pair = sym_u.replace("=X", "")
+            q_str = "US Dollar Index DXY forex" if sym_u == "DX-Y.NYB" else f"{pair[:3]} {pair[3:6]} forex currency rate"
+        elif sym_u.startswith("^"):
+            q_str = f"{clean_co or clean_sym} index market"
+        else:
+            q_str = f"{clean_sym} {clean_co} stock".strip() if clean_co and clean_co.upper() != clean_sym else f"{clean_sym} stock"
 
         url = (
             f"https://news.google.com/rss/search?"
